@@ -98,6 +98,9 @@ export default function EnhanceControlDrawer({
   const activePasses = Number(telemetry?.dlss5Passes ?? settings.dlss5Passes ?? 1);
   const dupCount = telemetry?.dupSkipped || 0;
   const is30In60Detected = isStreaming && dupCount >= 5;
+  const detectedBackend = telemetry?.nrBackend || selfTestResult?.nrBackend || "";
+  const isRadeonNr = detectedBackend === "RadeonNR";
+  const nrShortName = isRadeonNr ? "RadeonNR 光影精雕" : "DLSS 5";
 
   return (
     <Drawer
@@ -119,7 +122,9 @@ export default function EnhanceControlDrawer({
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <span className="text-base font-extrabold tracking-tight text-emerald-400">
-                  🚀 DLSS 5 (双层叠加) + 真 X2 补帧中心
+                  {isRadeonNr
+                    ? "🔴 AMD Radeon 光影精雕 + 真 X2 补帧中心"
+                    : "🚀 DLSS 5 (双层叠加) + 真 X2 补帧中心"}
                 </span>
                 <Chip size="sm" color={settings.enabled ? "success" : "default"} variant="flat">
                   {settings.enabled ? "运行中" : "已旁路"}
@@ -146,7 +151,7 @@ export default function EnhanceControlDrawer({
             <div className="rounded-xl bg-zinc-900/90 border border-zinc-800 p-3 space-y-2">
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-zinc-200 truncate">
-                  🎮 {telemetry?.gpu || selfTestResult?.gpu || "NVIDIA DirectX 12 神经加速管线"}
+                  🎮 {telemetry?.gpu || selfTestResult?.gpu || "NVIDIA RTX / AMD Radeon 硬件增强管线"}
                 </span>
                 {!isStreaming && (
                   <Button
@@ -193,21 +198,21 @@ export default function EnhanceControlDrawer({
                     </div>
                     <div className="rounded-lg bg-zinc-950/80 px-2.5 py-1.5 border border-zinc-800/80">
                       <div className="text-[10px] text-zinc-400">
-                        DLSS 5 实测耗时 ({activePasses >= 2 ? "双层串联×2" : "单层×1"})
+                        {nrShortName} 实测耗时 ({activePasses >= 2 ? "双层串联×2" : "单层×1"})
                       </div>
                       <div className="text-xs font-semibold text-zinc-200">
                         {telemetry.dlss5Active
                           ? `${telemetry.dlss5WorkRes} · ${telemetry.dlss5Ms?.toFixed(1)}ms (${
-                              telemetry.dlss5Sync ? "同步阻塞" : `异步+${dlss5HostMs.toFixed(1)}ms`
+                              telemetry.dlss5Sync ? "同步零残影" : `异步+${dlss5HostMs.toFixed(1)}ms`
                             })`
                           : "已关闭 (+0.0ms)"}
                       </div>
                     </div>
                     <div className="rounded-lg bg-zinc-950/80 px-2.5 py-1.5 border border-zinc-800/80">
-                      <div className="text-[10px] text-zinc-400">录屏直通 / 光流状态</div>
+                      <div className="text-[10px] text-zinc-400">录屏直通 / 光流引擎</div>
                       <div className="text-xs font-semibold text-zinc-200">
                         {telemetry.recordable !== false ? "🟢 OBS/F9可录" : "🟡 内置捕获"} ·{" "}
-                        {telemetry.nvofa ? "NVOFA" : "CS光流"}
+                        {telemetry.nvofa ? "NVOFA 硬件" : "金字塔双向光流"}
                       </div>
                     </div>
                   </div>
@@ -217,10 +222,10 @@ export default function EnhanceControlDrawer({
                   {selfTestResult.selfTest ? (
                     <>
                       <div className="text-emerald-400 font-bold">
-                        ✅ 自检通过：双层 DLSS 5 + 黑夜防斑点 + NVOFA 光流 + 录屏直通全部就绪
+                        ✅ 自检通过：{selfTestResult.nrBackend === "RadeonNR" ? "AMD RadeonNR 双层光影精雕 + 金字塔双向光流" : "双层 DLSS 5 + NVOFA 硬件光流"} + 录屏直通全部就绪
                       </div>
                       <div className="text-zinc-300">
-                        黑夜最大偏差 <b>{selfTestResult.nightMaxAnomaly}/255</b> · 双层 DLSS5{" "}
+                        黑夜最大偏差 <b>{selfTestResult.nightMaxAnomaly}/255</b> · 双层渲染{" "}
                         <b>{selfTestResult.dlss5GpuMs}ms</b> · 球心中点{" "}
                         <b>x={selfTestResult.midpointBallX}</b> · UI闪烁{" "}
                         <b>{selfTestResult.uiFlickerDiff}</b>
@@ -498,15 +503,19 @@ export default function EnhanceControlDrawer({
               )}
             </div>
 
-            {/* 3. 内置真 DLSS 5 单层 / 双层串联叠加神经渲染 */}
+            {/* 3. 内置真 DLSS 5 (N卡) / RadeonNR Oklab 光影精雕 (A卡) 单层与双层串联叠加 */}
             <div className="rounded-xl bg-zinc-900/70 border border-zinc-800 p-3 space-y-3">
               <div className="flex items-center justify-between">
                 <div>
                   <div className="font-bold text-purple-400 text-xs">
-                    🧠 3. 内置真 DLSS 5 神经渲染 (支持再叠加一层)
+                    {isRadeonNr
+                      ? "🔴 3. AMD RadeonNR 光影精雕与去色带 (支持再叠加一层)"
+                      : "🧠 3. 内置真 DLSS 5 神经渲染 (支持再叠加一层)"}
                   </div>
                   <div className="text-[10px] text-zinc-400">
-                    清零深度缓冲 + 黑夜暗场防大面积斑点 + Oklab 微结构增强
+                    {isRadeonNr
+                      ? "A卡专属 Oklab 三尺度立体光影 + H.264 天空去色带 + 黑夜防斑点"
+                      : "清零深度缓冲 + 黑夜暗场防大面积斑点 + Oklab 微结构增强"}
                   </div>
                 </div>
                 <Switch

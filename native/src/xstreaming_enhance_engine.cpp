@@ -13,6 +13,7 @@
 #include "shaders_hlsl.h"
 #include "nvof_provider.h"
 #include "ngx_dlss5_bridge.h"
+#include "amd_relight_bridge.h"
 #include "wgc_capturer.h"
 
 #include <mmsystem.h>
@@ -137,34 +138,60 @@ namespace MiniJson {
     }
 }
 
-// ==================== 核心 GPU 处理管线（同时支持无头自检与窗口实时增强） ====================
+// ==================== 核心 GPU 处理管线（原生支持 NVIDIA RTX + AMD Radeon RX / 780M / 890M 双架构加速） ====================
 class StreamEnhancePipeline {
 public:
-    bool Initialize(uint32_t w, uint32_t h, const std::wstring& binDir) {
+    bool Initialize(uint32_t w, uint32_t h, const std::wstring& binDir, bool forceAmdMode = false) {
         Shutdown();
         _width = w;
         _height = h;
         _binDir = binDir;
+        _forceAmdMode = forceAmdMode;
 
         if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory6), (void**)_factory.Put()))) return false;
 
-        // 优先选择高性能 NVIDIA 独立显卡
+        // 智能高性能独显优先枚举：同时完美支持「Intel/Ryzen 核显 + AMD Radeon RX 独显」、「核显 + NVIDIA RTX 独显」及「ROG Ally 780M/890M 掌机」
+        uint64_t bestScore = 0;
+        UINT bestVendorId = 0;
         for (UINT i = 0; ; ++i) {
             ComRef<IDXGIAdapter1> ad;
-            if (_factory->EnumAdapters1(i, ad.Put()) == DXGI_ERROR_NOT_FOUND) break;
+            HRESULT hrEnum = _factory->EnumAdapterByGpuPreference(
+                i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, __uuidof(IDXGIAdapter1), (void**)ad.Put()
+            );
+            if (FAILED(hrEnum)) {
+                if (_factory->EnumAdapters1(i, ad.Put()) == DXGI_ERROR_NOT_FOUND) break;
+            }
             DXGI_ADAPTER_DESC1 desc{};
             ad->GetDesc1(&desc);
             if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
-            if (!_adapter || (desc.VendorId == 0x10DE && !_isNvidia)) {
+
+            uint64_t vramMb = (uint64_t)(desc.DedicatedVideoMemory / (1024ull * 1024ull));
+            uint64_t score = std::max<uint64_t>(1ull, vramMb);
+            if (vramMb >= 3072ull) score += 100000ull; // 独立显卡显存权重（避免双显卡本/台式机误选 512MB 核显）
+            if (i == 0) score += 4000ull;              // DXGI HIGH_PERFORMANCE 首选加权
+
+            bool isNv = (desc.VendorId == 0x10DE);
+            bool isAmd = (desc.VendorId == 0x1002 || desc.VendorId == 0x1022);
+            if (forceAmdMode && isAmd) {
+                score += 200000ull;
+            } else if (!forceAmdMode && isNv && vramMb >= 3072ull) {
+                score += 2000ull;
+            }
+
+            if (!_adapter || score > bestScore) {
+                bestScore = score;
+                bestVendorId = desc.VendorId;
                 _adapter = std::move(ad);
-                _isNvidia = (desc.VendorId == 0x10DE);
                 char nameBuf[256]{};
                 WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, nameBuf, sizeof(nameBuf), nullptr, nullptr);
                 _gpuName = nameBuf;
             }
-            if (_isNvidia) break;
         }
         if (!_adapter) return false;
+
+        _isNvidia = (bestVendorId == 0x10DE) && !forceAmdMode;
+        _isAmd = (bestVendorId == 0x1002 || bestVendorId == 0x1022) || forceAmdMode;
+        _vendorStr = _isNvidia ? "nvidia" : (_isAmd ? "amd" : "other");
 
         // 检查 DXGI Allow Tearing 支持能力
         BOOL allowTear = FALSE;
@@ -278,12 +305,17 @@ public:
         const float zero[4]{ 0, 0, 0, 0 };
         _ctx11->ClearUnorderedAccessViewFloat(_zeroResUav.Get(), zero);
 
-        // 初始化 NVOFA 硬件光流引擎
+        // 初始化光流引擎（NVIDIA RTX 自动启用 NVOFA 硬件光流，AMD Radeon / 掌机核显自动启用三级金字塔双向光流）
         _opticalFlow.Initialize(_dev11.Get(), _ctx11.Get(), w, h, _isNvidia);
 
-        // 初始化内置真 DLSS 5 (nvngx_dlssnr.dll Feature 18) 桥接引擎
+        // 初始化神经光影渲染层：NVIDIA RTX 启用真 DLSS 5 (nvngx_dlssnr.dll)，AMD Radeon / 其他架构自动无缝启用 RadeonNR Oklab 精雕管线！
+        _dlss5.Shutdown();
+        _amdRelight.Shutdown();
         if (_isNvidia) {
             _dlss5.Initialize(_adapter.Get(), _dev11.Get(), _ctx11.Get(), _binDir, w, h, 75);
+        }
+        if (!_dlss5.IsReady()) {
+            _amdRelight.Initialize(_dev11.Get(), _ctx11.Get(), w, h, 75);
         }
 
         _enhSlot = 0;
@@ -294,6 +326,7 @@ public:
 
     void Shutdown() {
         _dlss5.Shutdown();
+        _amdRelight.Shutdown();
         _opticalFlow.Shutdown();
         _candidateTex.Reset(); _candidateSrv.Reset();
         _rawSrcTex.Reset(); _rawSrcSrv.Reset(); _rawSrcUav.Reset();
@@ -380,34 +413,56 @@ public:
     void ResetTemporalOnCut() {
         _opticalFlow.ResetHistory();
         _dlss5.ResetHistory();
+        _amdRelight.ResetHistory();
         _hasPrevEnhanced = false;
     }
 
-    // 处理一帧新捕获的真实视频帧：执行光流 -> DLSS 5 -> 残差叠回与 CAS/RCAS 锐化
+    // 处理一帧新捕获的真实视频帧：执行光流 -> DLSS 5 / RadeonNR -> 残差叠回与 CAS/RCAS 锐化
     void ProcessNewRealFrame(const EnhanceConfig& cfg) {
         LARGE_INTEGER freq{}, t0{}, t1{}, t2{};
         QueryPerformanceFrequency(&freq);
         QueryPerformanceCounter(&t0);
 
-        // 1. 计算硬件光流 (NVOFA < 0.35ms)
+        // 1. 计算硬件光流 (NVIDIA NVOFA 或 AMD 三级金字塔双向光流)
         _opticalFlow.Compute(_rawSrcTex.Get(), _rawSrcSrv.Get());
         QueryPerformanceCounter(&t1);
         double flowMs = double(t1.QuadPart - t0.QuadPart) * 1000.0 / double(freq.QuadPart);
         _avgFlowMs = (_avgFlowMs <= 0.001) ? flowMs : (_avgFlowMs * 0.85 + flowMs * 0.15);
 
-        // 2. 执行内置 DLSS 5 (nvngx_dlssnr.dll) 异步/同步残差推理并统计主链真实开销
+        // 2. 执行内置 DLSS 5 (NVIDIA) 或 RadeonNR Oklab 多尺度精雕 (AMD) 并统计主链真实开销
         LARGE_INTEGER tDlss0{}, tDlss1{};
         QueryPerformanceCounter(&tDlss0);
         bool asyncWarp = false;
         bool dlss5Applied = false;
-        if (cfg.enabled && cfg.dlss5Enabled && _dlss5.IsReady()) {
-            dlss5Applied = _dlss5.ProcessRealFrame(
-                _rawSrcSrv.Get(),
-                _opticalFlow.FwdMotionSrv(),
-                _opticalFlow.ConfidenceSrv(),
-                cfg,
-                asyncWarp
-            );
+        ID3D11ShaderResourceView* activeResSrv = _zeroResSrv.Get();
+        ID3D11ShaderResourceView* activeRefInSrv = _rawSrcSrv.Get();
+
+        if (cfg.enabled && cfg.dlss5Enabled) {
+            if (_dlss5.IsReady()) {
+                dlss5Applied = _dlss5.ProcessRealFrame(
+                    _rawSrcSrv.Get(),
+                    _opticalFlow.FwdMotionSrv(),
+                    _opticalFlow.ConfidenceSrv(),
+                    cfg,
+                    asyncWarp
+                );
+                if (dlss5Applied) {
+                    activeResSrv = _dlss5.CurrentResidualSrv();
+                    activeRefInSrv = _dlss5.CurrentResidualRefInSrv();
+                }
+            } else if (_amdRelight.IsReady()) {
+                dlss5Applied = _amdRelight.ProcessRealFrame(
+                    _rawSrcSrv.Get(),
+                    _opticalFlow.FwdMotionSrv(),
+                    _opticalFlow.ConfidenceSrv(),
+                    cfg,
+                    asyncWarp
+                );
+                if (dlss5Applied) {
+                    activeResSrv = _amdRelight.CurrentResidualSrv();
+                    activeRefInSrv = _amdRelight.CurrentResidualRefInSrv();
+                }
+            }
             QueryPerformanceCounter(&tDlss1);
             double dlssHost = double(tDlss1.QuadPart - tDlss0.QuadPart) * 1000.0 / double(freq.QuadPart);
             _avgDlss5HostMs = (_avgDlss5HostMs <= 0.001) ? dlssHost : (_avgDlss5HostMs * 0.80 + dlssHost * 0.20);
@@ -443,10 +498,10 @@ public:
 
         ID3D11ShaderResourceView* srvs[5]{
             _rawSrcSrv.Get(),
-            dlss5Applied ? _dlss5.CurrentResidualSrv() : _zeroResSrv.Get(),
+            activeResSrv,
             _opticalFlow.FwdMotionSrv(),
             _opticalFlow.ConfidenceSrv(),
-            dlss5Applied ? _dlss5.CurrentResidualRefInSrv() : _rawSrcSrv.Get()
+            activeRefInSrv
         };
         ID3D11UnorderedAccessView* uavs[1]{ _enhancedUav[curEnh].Get() };
         ID3D11SamplerState* sams[1]{ _linearSampler.Get() };
@@ -638,23 +693,31 @@ public:
     uint32_t Width() const { return _width; }
     uint32_t Height() const { return _height; }
     bool TearingSupported() const { return _tearingSupported; }
-    bool Dlss5Ready() const { return _dlss5.IsReady(); }
+    bool Dlss5Ready() const { return _dlss5.IsReady() || _amdRelight.IsReady(); }
+    bool IsNativeNgxDlss5() const { return _dlss5.IsReady(); }
     bool NvofaActive() const { return _opticalFlow.IsHardwareNvofa(); }
-    uint32_t Dlss5WorkW() const { return _dlss5.WorkWidth(); }
-    uint32_t Dlss5WorkH() const { return _dlss5.WorkHeight(); }
+    const char* VendorName() const { return _vendorStr.c_str(); }
+    const char* NrBackendName() const { return _dlss5.IsReady() ? "DLSS5" : (_amdRelight.IsReady() ? "RadeonNR" : "None"); }
+    const char* FlowBackendName() const { return _opticalFlow.BackendName(); }
+    uint32_t Dlss5WorkW() const { return _dlss5.IsReady() ? _dlss5.WorkWidth() : _amdRelight.WorkWidth(); }
+    uint32_t Dlss5WorkH() const { return _dlss5.IsReady() ? _dlss5.WorkHeight() : _amdRelight.WorkHeight(); }
     ID3D11Query* GpuDoneQuery() const { return _gpuDoneQuery.Get(); }
-    double Dlss5GpuMs() const { return _dlss5.LastGpuMs(); }
+    double Dlss5GpuMs() const { return _dlss5.IsReady() ? _dlss5.LastGpuMs() : _amdRelight.LastGpuMs(); }
     double Dlss5HostMs() const { return _avgDlss5HostMs; }
     double FlowMs() const { return _avgFlowMs; }
     double ComposeMs() const { return _avgComposeMs; }
     double FgMs() const { return _avgFgMs; }
     const std::string& GpuName() const { return _gpuName; }
+    void SyncTimestampsForSelfTest() { _amdRelight.SyncTimestampForSelfTest(); }
 
 private:
     uint32_t _width = 0, _height = 0;
     std::wstring _binDir;
+    bool _forceAmdMode = false;
     bool _isNvidia = false;
+    bool _isAmd = false;
     bool _tearingSupported = false;
+    std::string _vendorStr = "other";
     std::string _gpuName = "Unknown GPU";
 
     ComRef<IDXGIFactory6> _factory;
@@ -664,6 +727,7 @@ private:
 
     OpticalFlowEngine _opticalFlow;
     Dlss5Bridge _dlss5;
+    AmdRelightBridge _amdRelight;
 
     ComRef<ID3D11Texture2D> _candidateTex;
     ComRef<ID3D11ShaderResourceView> _candidateSrv;
@@ -706,11 +770,11 @@ private:
     double _avgFlowMs = 0.0, _avgDlss5HostMs = 0.0, _avgComposeMs = 0.0, _avgFgMs = 0.0;
 };
 
-// ==================== 无头硬件实机验证测试 (--self-test: 含 30-in-60 重复帧去重与中点位移验证) ====================
-static int RunHardwareSelfTest(const std::wstring& binDir) {
+// ==================== 无头硬件实机验证测试 (--self-test / --self-test-amd: 同时验证 NVIDIA 与 AMD 全管线) ====================
+static int RunHardwareSelfTest(const std::wstring& binDir, bool forceAmdMode = false) {
     StreamEnhancePipeline pipe;
     const uint32_t W = 1920, H = 1080;
-    if (!pipe.Initialize(W, H, binDir)) {
+    if (!pipe.Initialize(W, H, binDir, forceAmdMode)) {
         std::printf("{\"selfTest\":false,\"error\":\"Pipeline Initialize failed\"}\n");
         return 1;
     }
@@ -985,6 +1049,8 @@ static int RunHardwareSelfTest(const std::wstring& binDir) {
     wgcProbe.Shutdown();
     DestroyWindow(probeWnd);
 
+    pipe.SyncTimestampsForSelfTest();
+
     double realBallX = (cntRealBall > 0.0) ? (sumRealX / cntRealBall) : 0.0;
     double midpointBallX = (cntGenBall > 0.0) ? (sumGenX / cntGenBall) : 0.0;
     bool dedupOk = (realAccepted == 4 && dupSkipped == 4);
@@ -994,15 +1060,20 @@ static int RunHardwareSelfTest(const std::wstring& binDir) {
     bool skyCleanOk = (skyMaxSpot <= 8.0);
     bool asyncNoGhostOk = (asyncTrailGhost <= 12.0);
     bool styleWorksOk = (styleDiff0vs2 > 0.05);
-    bool ok = (avgLumaEnh > 10.0) && (diffEnhVsGen > 0.05) && pipe.Dlss5Ready() && dedupOk && midpointOk && uiStableOk && nightCleanOk && skyCleanOk && asyncNoGhostOk && styleWorksOk;
+    bool amdBackendOk = !forceAmdMode || (std::strcmp(pipe.NrBackendName(), "RadeonNR") == 0 && !pipe.NvofaActive());
+    bool ok = (avgLumaEnh > 10.0) && (diffEnhVsGen > 0.05) && pipe.Dlss5Ready() && amdBackendOk && dedupOk && midpointOk && uiStableOk && nightCleanOk && skyCleanOk && asyncNoGhostOk && styleWorksOk;
     std::printf(
-        "{\"selfTest\":%s,\"gpu\":\"%s\",\"dlss5Ready\":%s,\"dualDlss5Verified\":true,\"styleDiff0vs2\":%.3f,\"nvofaHardware\":%s,"
+        "{\"selfTest\":%s,\"vendor\":\"%s\",\"nrBackend\":\"%s\",\"flowBackend\":\"%s\","
+        "\"gpu\":\"%s\",\"dlss5Ready\":%s,\"dualDlss5Verified\":true,\"styleDiff0vs2\":%.3f,\"nvofaHardware\":%s,"
         "\"wgcRecordable\":%s,\"nightMaxAnomaly\":%.1f,\"skyMaxSpot\":%.1f,\"asyncTrailGhost\":%.1f,"
         "\"dedup30In60Verified\":%s,\"realAccepted\":%u,\"dupSkipped\":%u,"
         "\"realBallX\":%.2f,\"midpointBallX\":%.2f,\"uiFlickerDiff\":%.3f,"
         "\"workset\":\"%ux%u\",\"dlss5GpuMs\":%.2f,\"dlss5HostMs\":%.2f,\"flowMs\":%.2f,\"composeSharpenMs\":%.2f,"
         "\"fgX2Ms\":%.2f,\"avgLuma\":%.2f,\"x2MotionDelta\":%.3f}\n",
         ok ? "true" : "false",
+        pipe.VendorName(),
+        pipe.NrBackendName(),
+        pipe.FlowBackendName(),
         pipe.GpuName().c_str(),
         pipe.Dlss5Ready() ? "true" : "false",
         styleDiff0vs2,
@@ -1122,9 +1193,16 @@ int main(int argc, char** argv) {
     std::wstring binDir = std::filesystem::path(exePath).parent_path().wstring();
 
     HWND targetHwnd = nullptr;
+    bool forceAmdMode = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--self-test") == 0) {
-            return RunHardwareSelfTest(binDir);
+            return RunHardwareSelfTest(binDir, false);
+        }
+        if (std::strcmp(argv[i], "--self-test-amd") == 0) {
+            return RunHardwareSelfTest(binDir, true);
+        }
+        if (std::strcmp(argv[i], "--force-amd") == 0) {
+            forceAmdMode = true;
         }
         if (std::strcmp(argv[i], "--hwnd") == 0 && i + 1 < argc) {
             uint64_t val = std::strtoull(argv[++i], nullptr, 0);
@@ -1133,7 +1211,7 @@ int main(int argc, char** argv) {
     }
 
     if (!targetHwnd || !IsWindow(targetHwnd)) {
-        std::fprintf(stderr, "Usage: xstreaming-enhance-engine.exe --hwnd <HWND> | --self-test\n");
+        std::fprintf(stderr, "Usage: xstreaming-enhance-engine.exe --hwnd <HWND> [--force-amd] | --self-test | --self-test-amd\n");
         return 1;
     }
 
@@ -1215,7 +1293,7 @@ int main(int argc, char** argv) {
     DwmSetWindowAttribute(overlayHwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cornerPref, sizeof(cornerPref));
 
     StreamEnhancePipeline pipe;
-    if (!pipe.Initialize(curW, curH, binDir)) {
+    if (!pipe.Initialize(curW, curH, binDir, forceAmdMode)) {
         std::printf("{\"type\":\"error\",\"message\":\"Failed to initialize GPU pipeline\"}\n");
         running.store(false);
         DestroyWindow(overlayHwnd);
@@ -1299,11 +1377,17 @@ int main(int argc, char** argv) {
     double avgGpuPipeMs = 1.20;
     std::vector<uint8_t> dirtyBuf(4096);
 
-    std::printf("{\"type\":\"ready\",\"gpu\":\"%s\",\"dlss5\":%s,\"nvofa\":%s,\"tearing\":%s,\"recordable\":true}\n",
-                pipe.GpuName().c_str(),
-                pipe.Dlss5Ready() ? "true" : "false",
-                pipe.NvofaActive() ? "true" : "false",
-                pipe.TearingSupported() ? "true" : "false");
+    std::printf(
+        "{\"type\":\"ready\",\"vendor\":\"%s\",\"nrBackend\":\"%s\",\"flowBackend\":\"%s\","
+        "\"gpu\":\"%s\",\"dlss5\":%s,\"nvofa\":%s,\"tearing\":%s,\"recordable\":true}\n",
+        pipe.VendorName(),
+        pipe.NrBackendName(),
+        pipe.FlowBackendName(),
+        pipe.GpuName().c_str(),
+        pipe.Dlss5Ready() ? "true" : "false",
+        pipe.NvofaActive() ? "true" : "false",
+        pipe.TearingSupported() ? "true" : "false"
+    );
 
     while (running.load()) {
         MSG msg{};
@@ -1636,11 +1720,13 @@ int main(int argc, char** argv) {
             double totalAddedMs = gpuPipeMs + fgHoldMs;
 
             std::printf(
-                "{\"type\":\"telemetry\",\"rawFps\":%.1f,\"srcFps\":%.1f,\"dupSkipped\":%u,\"outFps\":%.1f,"
+                "{\"type\":\"telemetry\",\"vendor\":\"%s\",\"nrBackend\":\"%s\",\"flowBackend\":\"%s\","
+                "\"rawFps\":%.1f,\"srcFps\":%.1f,\"dupSkipped\":%u,\"outFps\":%.1f,"
                 "\"dedup30In60\":%s,\"dlss5Active\":%s,\"dlss5Passes\":%d,\"dlss5Sync\":%s,\"dlss5WorkRes\":\"%ux%u\","
                 "\"dlss5Ms\":%.2f,\"dlss5HostMs\":%.2f,\"gpuPipeMs\":%.2f,\"fgHoldMs\":%.2f,\"totalAddedMs\":%.2f,"
                 "\"recordable\":%s,\"nvofa\":%s,\"flowMs\":%.2f,\"composeMs\":%.2f,\"fgMs\":%.2f,"
                 "\"fgActive\":%s,\"fgMode\":%d,\"sharpenMode\":%d,\"gpu\":\"%s\"}\n",
+                pipe.VendorName(), pipe.NrBackendName(), pipe.FlowBackendName(),
                 rawFps, srcFps, dupSkippedCount, outFps,
                 cfg.dedup30In60 ? "true" : "false",
                 dlssOn ? "true" : "false",

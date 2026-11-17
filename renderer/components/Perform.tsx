@@ -58,7 +58,8 @@ function Perform({ xPlayer, connectState, enhanceTelemetry, isRecording }: any) 
   const dlss5On = !!enhanceTelemetry?.dlss5Active;
   const dlss5Passes = Number(enhanceTelemetry?.dlss5Passes ?? 1);
   const dlss5Sync = !!enhanceTelemetry?.dlss5Sync;
-  const dlssTag = dlss5Passes >= 2 ? "DLSS5×2" : "DLSS5";
+  const nrBaseName = enhanceTelemetry?.nrBackend === "RadeonNR" ? "RadeonNR" : "DLSS5";
+  const dlssTag = dlss5Passes >= 2 ? `${nrBaseName}×2` : nrBaseName;
 
   const dlssDetailText = dlss5On
     ? `${dlss5Ms.toFixed(1)}ms(${dlss5Sync ? "同步阻塞" : `异步·主链+${dlss5HostMs.toFixed(1)}ms`})`

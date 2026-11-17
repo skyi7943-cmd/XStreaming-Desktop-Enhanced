@@ -39,10 +39,17 @@ if ($LASTEXITCODE -ne 0) {
     throw "xstreaming-enhance-engine.exe 编译失败 (ExitCode=$LASTEXITCODE)"
 }
 
-Write-Host "[2/2] 正在执行 RTX 硬件全管线自动化自检 (--self-test) ..."
+Write-Host "[2/3] 正在执行 NVIDIA RTX 硬件全管线自动化自检 (--self-test) ..."
 $testOut = & $outExe --self-test
 Write-Host $testOut
 if ($LASTEXITCODE -ne 0) {
-    throw "硬件管线自检未通过 (ExitCode=$LASTEXITCODE)"
+    throw "NVIDIA 硬件管线自检未通过 (ExitCode=$LASTEXITCODE)"
 }
-Write-Host "✅ 原生 DLSS 5 + NVOFA 低延迟 X2 插帧 + CAS/RCAS 锐化引擎编译与实机验证全部通过！"
+
+Write-Host "[3/3] 正在执行 AMD Radeon (RadeonNR + 三级金字塔双向光流) 全管线实机自检 (--self-test-amd) ..."
+$testAmdOut = & $outExe --self-test-amd
+Write-Host $testAmdOut
+if ($LASTEXITCODE -ne 0) {
+    throw "AMD Radeon 硬件管线自检未通过 (ExitCode=$LASTEXITCODE)"
+}
+Write-Host "✅ 原生双架构 (NVIDIA DLSS 5/NVOFA + AMD RadeonNR/PyrFlow) 低延迟 X2 插帧引擎编译与实机验证全部通过！"

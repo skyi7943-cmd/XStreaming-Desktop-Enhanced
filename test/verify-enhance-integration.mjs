@@ -66,6 +66,46 @@ assert.ok(report.flowMs < 5.0, `光流耗时异常: ${report.flowMs}ms`);
 assert.ok(report.composeSharpenMs < 2.0, `合成锐化耗时异常: ${report.composeSharpenMs}ms`);
 assert.ok(report.fgX2Ms < 15.0, `X2 补帧耗时异常: ${report.fgX2Ms}ms`);
 
+console.log("=== [2B/3] 执行 AMD Radeon 全管线自检 (--self-test-amd: RadeonNR + AMD_PyrFlow) ===");
+const amdRes = spawnSync(engineExe, ["--self-test-amd"], {
+  cwd: binDir,
+  encoding: "utf8",
+  timeout: 20000,
+});
+assert.equal(amdRes.status, 0, `--self-test-amd 退出码非 0: ${amdRes.status}, stderr=${amdRes.stderr}`);
+const amdReport = JSON.parse(amdRes.stdout.trim().split(/\r?\n/).pop());
+console.log("📊 AMD Radeon 管线实测报告:", amdReport);
+assert.equal(amdReport.selfTest, true, "AMD Radeon 管线自检未通过");
+assert.equal(amdReport.vendor, "amd", `期望 vendor=amd，实际: ${amdReport.vendor}`);
+assert.equal(amdReport.nrBackend, "RadeonNR", `期望 nrBackend=RadeonNR，实际: ${amdReport.nrBackend}`);
+assert.equal(amdReport.flowBackend, "AMD_PyrFlow", `期望 flowBackend=AMD_PyrFlow，实际: ${amdReport.flowBackend}`);
+assert.equal(amdReport.dlss5Ready, true, "AMD RadeonNR 光影精雕管线未就绪");
+assert.ok(
+  amdReport.styleDiff0vs2 !== undefined && amdReport.styleDiff0vs2 > 1.0,
+  `AMD 自然均衡(Style 0)与电影光影(Style 2)风格切换未生效: ${amdReport.styleDiff0vs2}`
+);
+assert.ok(
+  amdReport.nightMaxAnomaly !== undefined && amdReport.nightMaxAnomaly <= 8.0,
+  `AMD 黑夜暗场异常亮斑偏差过高: ${amdReport.nightMaxAnomaly}`
+);
+assert.ok(
+  amdReport.skyMaxSpot !== undefined && amdReport.skyMaxSpot <= 8.0,
+  `AMD 明亮天空斑点阶跃过高: ${amdReport.skyMaxSpot}`
+);
+assert.ok(
+  amdReport.asyncTrailGhost !== undefined && amdReport.asyncTrailGhost <= 12.0,
+  `AMD 移动物体后方残影过高: ${amdReport.asyncTrailGhost}`
+);
+assert.equal(amdReport.dedup30In60Verified, true, "AMD 30-in-60 重复帧智能去重未通过");
+assert.ok(
+  amdReport.midpointBallX >= 534.0 && amdReport.midpointBallX <= 546.0,
+  `AMD 金字塔双向光流补帧中点几何坐标偏离理想值 540.0: ${amdReport.midpointBallX}`
+);
+assert.ok(
+  amdReport.uiFlickerDiff !== undefined && amdReport.uiFlickerDiff < 1.5,
+  `AMD 彩色 UI 抗闪烁误差过高: ${amdReport.uiFlickerDiff}`
+);
+
 console.log("=== [3/3] 验证真实窗口 HWND 挂载、实时热调参与无残留退出 ===");
 // 获取当前桌面窗口句柄用于测试挂载与管道通信
 const psHwnd = spawnSync(

@@ -66,6 +66,9 @@ export interface EnhanceSettings {
 export interface EnhanceTelemetry {
   running: boolean;
   ready?: boolean;
+  vendor?: string;
+  nrBackend?: string;
+  flowBackend?: string;
   rawFps?: number;
   srcFps: number;
   dupSkipped?: number;

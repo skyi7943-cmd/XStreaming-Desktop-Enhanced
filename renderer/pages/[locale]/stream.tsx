@@ -648,7 +648,11 @@ function Stream() {
     applyWifi6LowLatencyMode(next.wifi6JitterMode);
     setAvSyncUnbind(next.avSyncUnbind);
     setTurboGamepadEnabled(next.turboGamepad);
-    void Ipc.send("enhance", "updateConfig", next).catch(() => undefined);
+    // 录制期间若用户打开 F8 实时调参，强制保持 obsCaptureCompat=true，避免覆盖层切回防捕获锁死导致录屏丢失增强层
+    const enginePatch = enhancedRecorder.isRecording()
+      ? { ...next, obsCaptureCompat: true }
+      : next;
+    void Ipc.send("enhance", "updateConfig", enginePatch).catch(() => undefined);
 
     // 若开启原生增强引擎则移除浏览器慢速 SVG 卷积滤镜，确保零拷贝硬件直通最低延迟
     const videoStyle = document.getElementById("video-css");

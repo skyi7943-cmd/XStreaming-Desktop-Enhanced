@@ -164,67 +164,420 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
 }
 )hlsl";
 
-// 2. 通用快速多尺度搜索光流计算着色器（非 NVIDIA 显卡兜底）
-static const char* HLSL_FALLBACK_FLOW = R"hlsl(
-Texture2D<float4> CurrTex : register(t0);
-Texture2D<float4> PrevTex : register(t1);
-SamplerState LinearClamp  : register(s0);
+// 2A. AMD Radeon / 通用 GPU 三级金字塔特征构建着色器 (Luma + 双色差 + 局部梯度结构)
+static const char* HLSL_PYR_BUILD = R"hlsl(
+Texture2D<float4> SrcTex : register(t0);
+SamplerState LinearClamp : register(s0);
 
-RWTexture2D<float2> OutFwdMotion : register(u0);
-RWTexture2D<float2> OutBwdMotion : register(u1);
-RWTexture2D<float2> OutConf      : register(u2); // .x = Curr 空间前向可见置信度, .y = Prev 空间反向可见置信度
+RWTexture2D<float4> DstPyr : register(u0); // .x=Luma, .y=(R-G)*0.5, .z=(B-G)*0.5, .w=GradStruct
 
-cbuffer FallbackFlowCB : register(b0) {
-    uint2 Extent;
-    float2 InvExtent;
+cbuffer PyrBuildCB : register(b0) {
+    uint2  DstExtent;
+    float2 InvDstExtent;
+    uint   FromBaseColor;
+    uint3  Pad0;
 };
 
-float Luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+float4 ExtractFeatureFromRgb(float3 c) {
+    float luma = dot(c, float3(0.299, 0.587, 0.114));
+    return float4(luma, (c.r - c.g) * 0.5, (c.b - c.g) * 0.5, 0.0);
+}
 
-float PatchSAD(float2 uvCurr, float2 uvPrev) {
-    float sad = 0.0;
-    [unroll] for (int y = -1; y <= 1; ++y) {
-        [unroll] for (int x = -1; x <= 1; ++x) {
-            float2 off = float2(x, y) * InvExtent * 2.0;
-            float lc = Luma(CurrTex.SampleLevel(LinearClamp, uvCurr + off, 0).rgb);
-            float lp = Luma(PrevTex.SampleLevel(LinearClamp, uvPrev + off, 0).rgb);
-            sad += abs(lc - lp);
+float4 SampleFiltered(float2 uv) {
+    uv = clamp(uv, float2(0.0, 0.0), float2(1.0, 1.0));
+    float4 s = SrcTex.SampleLevel(LinearClamp, uv, 0);
+    return (FromBaseColor != 0) ? ExtractFeatureFromRgb(s.rgb) : s;
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= DstExtent)) return;
+    float2 uv = (float2(tid.xy) + 0.5) * InvDstExtent;
+    float2 q = InvDstExtent * 0.25;
+
+    // 4 点抗混叠高斯盒式降采样，消除棋盘格与细线条摩尔纹
+    float4 f00 = SampleFiltered(uv + float2(-q.x, -q.y));
+    float4 f10 = SampleFiltered(uv + float2( q.x, -q.y));
+    float4 f01 = SampleFiltered(uv + float2(-q.x,  q.y));
+    float4 f11 = SampleFiltered(uv + float2( q.x,  q.y));
+    float4 avg = 0.25 * (f00 + f10 + f01 + f11);
+
+    float lL = SampleFiltered(uv - float2(InvDstExtent.x, 0.0)).x;
+    float lR = SampleFiltered(uv + float2(InvDstExtent.x, 0.0)).x;
+    float lU = SampleFiltered(uv - float2(0.0, InvDstExtent.y)).x;
+    float lD = SampleFiltered(uv + float2(0.0, InvDstExtent.y)).x;
+    float grad = saturate((abs(lR - lL) + abs(lD - lU)) * 1.75);
+
+    DstPyr[tid.xy] = float4(avg.xyz, grad);
+}
+)hlsl";
+
+// 2B. AMD Radeon 三级由粗到精金字塔双向光流搜索着色器 (L2 -> L1 -> L0，最高覆盖 ±96px 大位移转视角)
+static const char* HLSL_PYR_FLOW_ESTIMATE = R"hlsl(
+Texture2D<float4> SrcPyr     : register(t0);
+Texture2D<float4> RefPyr     : register(t1);
+Texture2D<float2> ParentFlow : register(t2);
+SamplerState LinearClamp     : register(s0);
+
+RWTexture2D<float2> OutLevelFlow : register(u0);
+
+cbuffer PyrFlowCB : register(b0) {
+    uint2  Extent;
+    float2 InvExtent;
+    float2 InvParentExtent;
+    float2 ParentScale;
+    uint   HasParent;
+    uint3  Pad0;
+};
+
+float EvalPatchCost(float2 uvSrc, float2 vecPx) {
+    float2 uvRef = uvSrc + vecPx * InvExtent;
+    if (any(uvRef < 0.001) || any(uvRef > 0.999)) return 999.0;
+    float cost = 0.0;
+    [unroll] for (int dy = -1; dy <= 1; ++dy) {
+        [unroll] for (int dx = -1; dx <= 1; ++dx) {
+            float2 off = float2(dx, dy) * InvExtent;
+            float4 a = SrcPyr.SampleLevel(LinearClamp, uvSrc + off, 0);
+            float4 b = RefPyr.SampleLevel(LinearClamp, uvRef + off, 0);
+            float4 d = abs(a - b);
+            cost += d.x + 0.90 * (d.y + d.z) + 0.35 * d.w;
         }
     }
-    return sad;
+    // 极微弱零位移正则项：纯色暗场/蓝天无纹理区自动锚定 0 位移，绝不产生伪随机漂移
+    return cost * (1.0 / 9.0) + length(vecPx) * 0.00035;
 }
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 tid : SV_DispatchThreadID) {
     if (any(tid.xy >= Extent)) return;
     float2 uv = (float2(tid.xy) + 0.5) * InvExtent;
+
     float2 bestVec = float2(0.0, 0.0);
-    float bestSad = PatchSAD(uv, uv);
+    float bestCost = EvalPatchCost(uv, bestVec);
 
     const float2 dirs[8] = {
-        float2(1,0), float2(-1,0), float2(0,1), float2(0,-1),
-        float2(1,1), float2(-1,1), float2(1,-1), float2(-1,-1)
+        float2(1, 0), float2(-1, 0), float2(0, 1), float2(0, -1),
+        float2(1, 1), float2(-1, 1), float2(1, -1), float2(-1, -1)
     };
-    float radii[4] = { 16.0, 8.0, 3.0, 1.0 };
-    [unroll] for (int s = 0; s < 4; ++s) {
-        float r = radii[s];
-        float2 stageCenter = bestVec;
-        [unroll] for (int d = 0; d < 8; ++d) {
-            float2 cand = stageCenter + dirs[d] * r;
-            float2 candUv = uv + cand * InvExtent;
-            if (all(candUv >= 0.0) && all(candUv <= 1.0)) {
-                float sad = PatchSAD(uv, candUv);
-                if (sad < bestSad - 0.002) {
-                    bestSad = sad;
+
+    if (HasParent != 0) {
+        // 继承父级金字塔光流 + 4 邻域前景边界传播候选（精准锁住移动车体/人物边缘）
+        float2 p0 = ParentFlow.SampleLevel(LinearClamp, uv, 0) * ParentScale;
+        float c0 = EvalPatchCost(uv, p0);
+        if (c0 < bestCost - 0.0008) { bestCost = c0; bestVec = p0; }
+
+        const float2 pOffs[4] = {
+            float2( 2.0, 0.0), float2(-2.0, 0.0),
+            float2( 0.0, 2.0), float2( 0.0,-2.0)
+        };
+        [loop] for (int k = 0; k < 4; ++k) {
+            float2 pk = ParentFlow.SampleLevel(LinearClamp, clamp(uv + pOffs[k] * InvParentExtent, 0.0, 1.0), 0) * ParentScale;
+            float ck = EvalPatchCost(uv, pk);
+            if (ck < bestCost - 0.0012) { bestCost = ck; bestVec = pk; }
+        }
+
+        const float steps[3] = { 2.0, 1.0, 0.5 };
+        [loop] for (int s = 0; s < 3; ++s) {
+            float r = steps[s];
+            float2 center = bestVec;
+            [loop] for (int d = 0; d < 8; ++d) {
+                float2 cand = center + dirs[d] * r;
+                float cc = EvalPatchCost(uv, cand);
+                if (cc < bestCost - 0.0008) {
+                    bestCost = cc;
+                    bestVec = cand;
+                }
+            }
+        }
+    } else {
+        // L2 顶层大范围种子搜索（覆盖 ±24px / ±48px / ±72px 主机 30fps 快速摇杆转视角）
+        const float2 wideSeeds[8] = {
+            float2(-3.0, 0.0), float2( 3.0, 0.0), float2(0.0, -3.0), float2(0.0,  3.0),
+            float2(-6.0, 0.0), float2( 6.0, 0.0), float2(-9.0, 0.0), float2( 9.0, 0.0)
+        };
+        [loop] for (int w = 0; w < 8; ++w) {
+            float cw = EvalPatchCost(uv, wideSeeds[w]);
+            if (cw < bestCost - 0.0012) { bestCost = cw; bestVec = wideSeeds[w]; }
+        }
+
+        const float coarseSteps[4] = { 4.0, 2.0, 1.0, 0.5 };
+        [loop] for (int s = 0; s < 4; ++s) {
+            float r = coarseSteps[s];
+            float2 center = bestVec;
+            [loop] for (int d = 0; d < 8; ++d) {
+                float2 cand = center + dirs[d] * r;
+                float cc = EvalPatchCost(uv, cand);
+                if (cc < bestCost - 0.0008) {
+                    bestCost = cc;
                     bestVec = cand;
                 }
             }
         }
     }
-    float conf = saturate(1.0 - bestSad * 2.0);
-    OutFwdMotion[tid.xy] = bestVec;
-    OutBwdMotion[tid.xy] = -bestVec;
-    OutConf[tid.xy] = float2(conf, conf);
+
+    OutLevelFlow[tid.xy] = bestVec;
+}
+)hlsl";
+
+// 2C. AMD Radeon 全分辨率保边光流稠密化 + 真前向/反向循环一致性遮挡置信度着色器
+static const char* HLSL_PYR_FLOW_DENSIFY = R"hlsl(
+Texture2D<float2> FwdFlowL0 : register(t0);
+Texture2D<float2> BwdFlowL0 : register(t1);
+Texture2D<float4> CurrTex   : register(t2);
+Texture2D<float4> PrevTex   : register(t3);
+SamplerState LinearClamp    : register(s0);
+
+RWTexture2D<float2> OutFwdMotion : register(u0);
+RWTexture2D<float2> OutBwdMotion : register(u1);
+RWTexture2D<float2> OutConf      : register(u2); // .x = Curr 前向可见置信度, .y = Prev 反向可见置信度
+
+cbuffer PyrDensifyCB : register(b0) {
+    uint2  Extent;
+    float2 InvExtent;
+    float2 InvL0Extent;
+    float2 ScaleToFull;
+};
+
+float MaxDiff3(float3 a, float3 b) {
+    float3 d = abs(a - b);
+    return max(d.r, max(d.g, d.b));
+}
+
+float EvalFullMatch(Texture2D<float4> srcT, Texture2D<float4> refT, float2 uv, float2 vFull) {
+    float2 uvR = uv + vFull * InvExtent;
+    if (any(uvR < 0.0) || any(uvR > 1.0)) return 999.0;
+    float3 s0 = srcT.SampleLevel(LinearClamp, uv, 0).rgb;
+    float3 r0 = refT.SampleLevel(LinearClamp, uvR, 0).rgb;
+    float3 sx = srcT.SampleLevel(LinearClamp, clamp(uv + float2(InvExtent.x * 2.0, 0.0), 0.0, 1.0), 0).rgb;
+    float3 rx = refT.SampleLevel(LinearClamp, clamp(uvR + float2(InvExtent.x * 2.0, 0.0), 0.0, 1.0), 0).rgb;
+    return 0.65 * MaxDiff3(s0, r0) + 0.35 * MaxDiff3(sx, rx) + length(vFull) * 0.0002;
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= Extent)) return;
+    float2 uv = (float2(tid.xy) + 0.5) * InvExtent;
+
+    // 1. 前向光流 (Curr -> Prev) 全分辨率保边锐化上采样
+    float2 fwd = FwdFlowL0.SampleLevel(LinearClamp, uv, 0) * ScaleToFull;
+    float bestFwdErr = EvalFullMatch(CurrTex, PrevTex, uv, fwd);
+    float zeroFwdErr = EvalFullMatch(CurrTex, PrevTex, uv, float2(0.0, 0.0));
+    if (zeroFwdErr + 0.003 < bestFwdErr) { bestFwdErr = zeroFwdErr; fwd = float2(0.0, 0.0); }
+
+    const float2 nOff[4] = { float2(1,0), float2(-1,0), float2(0,1), float2(0,-1) };
+    [unroll] for (int i = 0; i < 4; ++i) {
+        float2 cand = FwdFlowL0.SampleLevel(LinearClamp, clamp(uv + nOff[i] * InvL0Extent, 0.0, 1.0), 0) * ScaleToFull;
+        float err = EvalFullMatch(CurrTex, PrevTex, uv, cand);
+        if (err + 0.004 < bestFwdErr) { bestFwdErr = err; fwd = cand; }
+    }
+
+    // 2. 反向光流 (Prev -> Curr) 独立全分辨率保边锐化上采样
+    float2 bwd = BwdFlowL0.SampleLevel(LinearClamp, uv, 0) * ScaleToFull;
+    float bestBwdErr = EvalFullMatch(PrevTex, CurrTex, uv, bwd);
+    float zeroBwdErr = EvalFullMatch(PrevTex, CurrTex, uv, float2(0.0, 0.0));
+    if (zeroBwdErr + 0.003 < bestBwdErr) { bestBwdErr = zeroBwdErr; bwd = float2(0.0, 0.0); }
+
+    [unroll] for (int j = 0; j < 4; ++j) {
+        float2 cand = BwdFlowL0.SampleLevel(LinearClamp, clamp(uv + nOff[j] * InvL0Extent, 0.0, 1.0), 0) * ScaleToFull;
+        float err = EvalFullMatch(PrevTex, CurrTex, uv, cand);
+        if (err + 0.004 < bestBwdErr) { bestBwdErr = err; bwd = cand; }
+    }
+
+    // 3. 真双向循环一致性校验：精准区分前景遮挡区与新露出背景区，彻底消除 AMD 补帧重影！
+    float2 refPrevUv = uv + fwd * InvExtent;
+    bool insidePrev = all(refPrevUv >= 0.0) && all(refPrevUv <= 1.0);
+    float2 bwdAtPrev = BwdFlowL0.SampleLevel(LinearClamp, clamp(refPrevUv, 0.0, 1.0), 0) * ScaleToFull;
+    float errFwd = length(fwd + bwdAtPrev);
+    float tolFwd = 1.65 + 0.14 * length(fwd);
+    float photoFwd = saturate(1.12 - bestFwdErr * 2.2);
+    float fwdConf = insidePrev ? (photoFwd * saturate(1.0 - errFwd / tolFwd)) : 0.0;
+
+    float2 refCurrUv = uv + bwd * InvExtent;
+    bool insideCurr = all(refCurrUv >= 0.0) && all(refCurrUv <= 1.0);
+    float2 fwdAtCurr = FwdFlowL0.SampleLevel(LinearClamp, clamp(refCurrUv, 0.0, 1.0), 0) * ScaleToFull;
+    float errBwd = length(bwd + fwdAtCurr);
+    float tolBwd = 1.65 + 0.14 * length(bwd);
+    float photoBwd = saturate(1.12 - bestBwdErr * 2.2);
+    float bwdConf = insideCurr ? (photoBwd * saturate(1.0 - errBwd / tolBwd)) : 0.0;
+
+    OutFwdMotion[tid.xy] = fwd;
+    OutBwdMotion[tid.xy] = bwd;
+    OutConf[tid.xy] = saturate(float2(fwdConf, bwdConf));
+}
+)hlsl";
+
+// 2D. AMD Radeon 专属 Oklab 多尺度光影重塑 + H.264 天空去色带 + 暗场零斑点精雕着色器 (RadeonNR)
+// 原生支持「自然均衡 (0) / 鲜明通透 (1) / 电影光影 (2)」三大风格及「再叠加一层 (Pass 1 -> Pass 2)」双层显存串联！
+static const char* HLSL_AMD_RELIGHT_PASS = R"hlsl(
+Texture2D<float4> WorkIn  : register(t0);
+SamplerState LinearClamp  : register(s0);
+
+RWTexture2D<float4> WorkOut : register(u0);
+
+cbuffer AmdRelightCB : register(b0) {
+    uint2  WorkExtent;
+    float2 InvWorkExtent;
+    uint   Style;           // 0 = 自然均衡, 1 = 鲜明通透, 2 = 电影光影
+    float  Intensity;       // 0.0 ~ 2.0
+    float  LocalTone;       // 0.0 ~ 2.0
+    float  LocalStructure;  // 0.0 ~ 2.0
+    float  SkinStructure;   // 0.0 ~ 2.0
+    uint   PassIndex;       // 0 = 第 1 层, 1 = 第 2 层串联叠加
+    float2 Pad0;
+};
+
+float DecodeSDR(float v) {
+    float a = abs(v);
+    return sign(v) * (a <= 0.04045 ? a / 12.92 : pow((a + 0.055) / 1.055, 2.4));
+}
+float EncodeSDR(float v) {
+    float a = abs(v);
+    return sign(v) * (a <= 0.0031308 ? a * 12.92 : 1.055 * pow(a, 1.0 / 2.4) - 0.055);
+}
+float3 DecodeRGB(float3 c) { return float3(DecodeSDR(c.r), DecodeSDR(c.g), DecodeSDR(c.b)); }
+float3 EncodeRGB(float3 c) { return float3(EncodeSDR(c.r), EncodeSDR(c.g), EncodeSDR(c.b)); }
+
+float SignedCbrt(float x) {
+    float ax = abs(x);
+    return (ax < 1e-12) ? 0.0 : (sign(x) * pow(ax, 1.0 / 3.0));
+}
+
+float3 RGBToLab(float3 c) {
+    float3 lin = DecodeRGB(c);
+    float l = SignedCbrt(dot(lin, float3(0.4122214708, 0.5363325363, 0.0514459929)));
+    float m = SignedCbrt(dot(lin, float3(0.2119034982, 0.6806995451, 0.1073969566)));
+    float s = SignedCbrt(dot(lin, float3(0.0883024619, 0.2817188376, 0.6299787005)));
+    return float3(
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+    );
+}
+
+float3 LabToLinear(float3 c) {
+    float3 v = float3(
+        c.x + 0.3963377774 * c.y + 0.2158037573 * c.z,
+        c.x - 0.1055613458 * c.y - 0.0638541728 * c.z,
+        c.x - 0.0894841775 * c.y - 1.2914855480 * c.z
+    );
+    v = v * v * v;
+    return float3(
+        dot(v, float3( 4.0767416621, -3.3077115913,  0.2309699292)),
+        dot(v, float3(-1.2684380046,  2.6097574011, -0.3413193965)),
+        dot(v, float3(-0.0041960863, -0.7034186147,  1.7076147010))
+    );
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= WorkExtent)) return;
+    float3 baseRgb = saturate(WorkIn.Load(int3(tid.xy, 0)).rgb);
+    if (Intensity <= 0.001) {
+        WorkOut[tid.xy] = float4(baseRgb, 1.0);
+        return;
+    }
+
+    float2 uv = (float2(tid.xy) + 0.5) * InvWorkExtent;
+    float3 lab0 = RGBToLab(baseRgb);
+
+    // 1. 细尺度保边采样 (r = 1.4px)：分离真实材质微纹理与 8-bit H.264 宏块阶梯色带
+    const float2 dirs4[4] = { float2(1, 0), float2(-1, 0), float2(0, 1), float2(0, -1) };
+    const float2 diag4[4] = { float2(0.707, 0.707), float2(-0.707, 0.707), float2(0.707, -0.707), float2(-0.707, -0.707) };
+
+    float3 sumFine = lab0 * 0.40;
+    float  wFine   = 0.40;
+    [unroll] for (int i = 0; i < 4; ++i) {
+        float3 s = RGBToLab(saturate(WorkIn.SampleLevel(LinearClamp, clamp(uv + dirs4[i] * InvWorkExtent * 1.35, 0.0, 1.0), 0).rgb));
+        float dl = abs(s.x - lab0.x);
+        float w = exp(-dl * 28.0);
+        sumFine += s * w;
+        wFine += w;
+    }
+    float3 labFine = sumFine / max(wFine, 1e-4);
+
+    // 2. 中尺度腔体立体光影采样 (r = 4.2px)：提取建筑/车身/岩石凹凸体积感并柔化天空 8x8 压缩块色带
+    float3 sumMeso = labFine * 0.35;
+    float  wMeso   = 0.35;
+    float  maxSmoothStep = 0.0;
+    [unroll] for (int j = 0; j < 4; ++j) {
+        float3 s1 = RGBToLab(saturate(WorkIn.SampleLevel(LinearClamp, clamp(uv + dirs4[j] * InvWorkExtent * 4.2, 0.0, 1.0), 0).rgb));
+        float3 s2 = RGBToLab(saturate(WorkIn.SampleLevel(LinearClamp, clamp(uv + diag4[j] * InvWorkExtent * 5.2, 0.0, 1.0), 0).rgb));
+        float d1 = abs(s1.x - lab0.x);
+        float d2 = abs(s2.x - lab0.x);
+        maxSmoothStep = max(maxSmoothStep, max(d1, d2));
+        float w1 = exp(-d1 * 18.0);
+        float w2 = exp(-d2 * 18.0) * 0.75;
+        sumMeso += s1 * w1 + s2 * w2;
+        wMeso += w1 + w2;
+    }
+    float3 labMeso = sumMeso / max(wMeso, 1e-4);
+
+    // 3. 大尺度局部环境光照包络采样 (r = 10.5px)：用于局部色调映射重打光
+    float sumMacroL = labMeso.x * 0.40;
+    float wMacro    = 0.40;
+    [unroll] for (int m = 0; m < 4; ++m) {
+        float3 sm = RGBToLab(saturate(WorkIn.SampleLevel(LinearClamp, clamp(uv + diag4[m] * InvWorkExtent * 10.5, 0.0, 1.0), 0).rgb));
+        float dm = abs(sm.x - lab0.x);
+        float wm = exp(-dm * 11.0);
+        sumMacroL += sm.x * wm;
+        wMacro += wm;
+    }
+    float macroL = sumMacroL / max(wMacro, 1e-4);
+
+    // 4. H.264 8-bit 缓变天空/迷雾自动去色带（仅在邻域整体梯度极平坦 < 0.016 时平滑阶梯，100% 保护真实纹理与边缘）
+    float debandMask = 1.0 - smoothstep(0.006, 0.018, maxSmoothStep);
+    float3 cleanLab = lerp(lab0, labMeso, debandMask * 0.55);
+
+    // 5. 黑夜纯暗场防斑点门控：RGB < 16 (Oklab L < 0.19) 严禁拉亮压缩底噪，100% 杜绝黑夜大面积斑点！
+    float nightGate = smoothstep(0.19, 0.33, lab0.x);
+    float highRoll  = 1.0 - 0.55 * smoothstep(0.84, 0.99, lab0.x);
+
+    // 微纹理抗蚊噪门限：屏蔽 ±2/255 编码噪点，精准雕刻真实游戏材质
+    float microRaw = lab0.x - labFine.x;
+    float microGate = smoothstep(0.0045, 0.015, abs(microRaw));
+    float detailMicro = microRaw * microGate;
+    float detailMeso  = (labFine.x - labMeso.x) * smoothstep(0.005, 0.020, abs(labFine.x - labMeso.x));
+    float detailMacro = (labMeso.x - macroL);
+
+    // 第 2 层叠加时采用 0.68 谐波阻尼系数，让双层串联既有浑厚立体感又绝不过曝振铃
+    float passGain = (PassIndex == 0) ? Intensity : (Intensity * 0.68);
+
+    float deltaL = 0.0;
+    float2 outChroma = cleanLab.yz;
+
+    if (Style == 0) {
+        // 风格 0：自然均衡 — 原汁原味微结构清晰还原 + 柔和立体层次
+        deltaL = (detailMicro * 0.30 * LocalStructure +
+                  detailMeso  * 0.20 * LocalTone +
+                  detailMacro * 0.08 * LocalTone) * nightGate * highRoll;
+        outChroma *= lerp(1.0, 1.04, saturate(passGain * nightGate));
+    } else if (Style == 1) {
+        // 风格 1：鲜明通透 — 扫除串流灰雾感，提亮中暗部通透度并增强自然色彩张力（内置暖肤色保护）
+        float clarityLift = 0.018 * sin(3.14159265 * saturate((cleanLab.x - 0.22) / 0.68));
+        deltaL = (clarityLift * LocalTone +
+                  detailMicro * 0.44 * LocalStructure +
+                  detailMeso  * 0.32 * LocalTone +
+                  detailMacro * 0.14 * LocalTone) * nightGate * highRoll;
+        float warmSkin = smoothstep(0.01, 0.06, cleanLab.y) * smoothstep(0.01, 0.06, cleanLab.z);
+        float chromaBoost = lerp(1.18, 1.06 + 0.04 * SkinStructure, warmSkin);
+        outChroma *= lerp(1.0, chromaBoost, saturate(passGain * nightGate));
+    } else {
+        // 风格 2：电影光影 — 胶片级 S 型光影重塑（深邃立体暗部 + 温润高光质感）+ 强烈腔体 AO 浮雕感
+        float tNorm = saturate((cleanLab.x - 0.22) / 0.68);
+        float filmicS = -0.028 * sin(6.2831853 * tNorm) * smoothstep(0.22, 0.34, cleanLab.x);
+        deltaL = (filmicS * LocalTone +
+                  detailMicro * 0.26 * LocalStructure +
+                  detailMeso  * 0.38 * LocalTone +
+                  detailMacro * 0.20 * LocalTone) * nightGate * highRoll;
+        // 电影冷暖色调分离：暗部微沉稳、亮部微暖金
+        float2 tintShift = lerp(float2(-0.0020, -0.0035), float2(0.0022, 0.0045), tNorm) * nightGate;
+        outChroma = outChroma * lerp(1.0, 1.10, saturate(passGain * nightGate)) + tintShift * saturate(passGain);
+    }
+
+    float finalL = clamp(cleanLab.x + deltaL * passGain, 0.0, 1.0);
+    float3 outLin = max(LabToLinear(float3(finalL, outChroma)), 0.0);
+    float3 outRgb = saturate(EncodeRGB(outLin));
+    WorkOut[tid.xy] = float4(outRgb, 1.0);
 }
 )hlsl";
 

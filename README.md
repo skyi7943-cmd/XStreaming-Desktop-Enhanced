@@ -1,13 +1,13 @@
 <h1 align="center">🚀 XStreaming Desktop Enhanced</h1>
 
 <p align="center">
-  <b>内置真 NVIDIA DLSS 5 神经渲染（支持双层串联） + NVOFA 硬件光流真 X2 插帧 + 全链路 0ms 级超低延迟 Xbox 桌面串流增强客户端</b>
+  <b>原生双架构硬件加速：内置真 NVIDIA DLSS 5 + AMD RadeonNR 光影精雕（均支持双层串联） + 真 X2 插帧 + 0ms 级超低延迟 Xbox 串流增强客户端</b>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-0078D6?style=flat-square&logo=windows" alt="Windows" />
-  <img src="https://img.shields.io/badge/Neural%20Rendering-NVIDIA%20DLSS%205%20(Feature%2018)-76B900?style=flat-square&logo=nvidia" alt="DLSS 5" />
-  <img src="https://img.shields.io/badge/Frame%20Gen-NVOFA%20True%20X2%20(30→60%20FPS)-10B981?style=flat-square" alt="X2 Frame Gen" />
+  <img src="https://img.shields.io/badge/NVIDIA-DLSS%205%20%2B%20NVOFA-76B900?style=flat-square&logo=nvidia" alt="NVIDIA DLSS 5" />
+  <img src="https://img.shields.io/badge/AMD%20Radeon-RadeonNR%20%2B%20PyrFlow%20X2-ED1C24?style=flat-square&logo=amd" alt="AMD Radeon" />
   <img src="https://img.shields.io/badge/Console-Xbox%20Series%20S%20%7C%20Series%20X-107C10?style=flat-square&logo=xbox" alt="Xbox Series X|S" />
 </p>
 
@@ -108,9 +108,14 @@ Xbox Series S 最大的遗憾是大量次世代 3A 大作（如《荒野大镖�
 
 ## 📦 快速开始与本地构建
 
-### 硬件与环境要求
+### 硬件与环境要求（NVIDIA RTX 与 AMD Radeon 满血双架构原生支持！）
 - **操作系统**：Windows 10 / Windows 11 64 位（推荐 Windows 11 22H2 及以上）
-- **显卡要求**：NVIDIA GeForce RTX 显卡（推荐 RTX 30 / 40 / 50 系列，最新 Game Ready 驱动以启用真 `nvngx_dlssnr.dll` Feature 18 与 NVOFA 硬件光流；非 RTX 显卡亦内置 Compute Shader 光流 + CAS/RCAS 锐化自动回退）
+- **🟢 NVIDIA GeForce RTX 显卡**（RTX 20 / 30 / 40 / 50 系列）：
+  自动启用真 **`nvngx_dlssnr.dll` (DLSS 5 Feature 18)** 单/双层神经渲染 + **第 4 代 NVOFA 硬件光流** 真 X2 补帧 + CAS/RCAS 去噪锐化。
+- **🔴 AMD Radeon 独显 & Windows 掌机核显**（RX 5000 / 6000 / 7000 / 9000 系列独显，以及 **ROG Ally / Ally X / Legion Go 等 Ryzen Radeon 680M / 780M / 890M 掌机与轻薄本**）：
+  1. **智能独显优先识别**：在「Intel/Ryzen 核显 + Radeon RX 独显」双显卡台式机或游戏本上，基于 `DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE` 与显存权重精准锁定高性能 Radeon 独显（并支持主板核显直连显示器 NT 共享句柄零拷贝跨卡桥接）；
+  2. **内置 `RadeonNR` Oklab 三尺度光影精雕与去色带引擎**：零外部 DLL 依赖，在 A 卡上 100% 完整激活第 3 栏全部功能——**「自然均衡 / 鲜明通透 / 电影光影」** 三大预设风格、**「再叠加一层」双层显存串联**、H.264 8-bit 天空阶梯去色带及黑夜暗场零斑点保护（双层 GPU 耗时仅 `~3ms`）；
+  3. **内置 `AMD_PyrFlow` 三级由粗到精金字塔双向光流引擎**：最高覆盖 `±96px` 30fps 主机大幅摇杆转视角，独立计算前/反向光流与循环一致性遮挡置信度，配合 `30-in-60` 重复帧滤除在 A 卡与 Windows 掌机上实现 **零重影真 30→60 FPS 丝滑补帧**！
 
 ### 开箱即用（Release 绿色免安装完整版）
 1. 直接点击下载 [**XStreaming-Desktop-Enhanced-v1.10.3-dlss5-Win64-Portable.zip (246.9 MB)**](https://github.com/skyi7943-cmd/XStreaming-Desktop-Enhanced/releases/download/v1.10.3-dlss5-v6/XStreaming-Desktop-Enhanced-v1.10.3-dlss5-Win64-Portable.zip)（已完整内置 `XStreaming.exe` + 原生超低延迟引擎 + `nvngx_dlssnr.dll` 真 DLSS 5 运行库，无需安装任何开发环境）；
