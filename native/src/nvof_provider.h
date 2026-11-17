@@ -355,7 +355,7 @@ private:
             ID3D11ShaderResourceView* srvs[3]{
                 _pyrSrv[srcSlot][l].Get(),
                 _pyrSrv[refSlot][l].Get(),
-                hasParent ? flowSrv[l + 1].Get() : nullptr
+                hasParent ? flowSrv[l + 1].Get() : flowSrv[1].Get()
             };
             ID3D11UnorderedAccessView* uavs[1]{ flowUav[l].Get() };
             _ctx->CSSetShaderResources(0, 3, srvs);

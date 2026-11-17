@@ -167,7 +167,7 @@ public:
 
     bool Initialize(ID3D11Device5* dev11, HWND targetHwnd) {
         Shutdown();
-        if (!dev11 || !targetHwnd || !IsWindow(targetHwnd)) return false;
+        if (!dev11 || !targetHwnd || !IsWindow(targetHwnd) || targetHwnd == GetDesktopWindow()) return false;
 
         _combaseMod = LoadLibraryExW(L"combase.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         _d3d11Mod = LoadLibraryExW(L"d3d11.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);

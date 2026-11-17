@@ -262,13 +262,13 @@ public:
         qd.Query = D3D11_QUERY_EVENT;
         _dev11->CreateQuery(&qd, _gpuDoneQuery.Put());
 
-        // 创建 8 字节 StructuredBuffer 用于超高速 (<0.01ms) GPU 30-in-60 重复帧与切镜检测结果回读
+        // 创建 16 字节 StructuredBuffer (uint4) 用于超高速 (<0.01ms) GPU 30-in-60 重复帧、全黑空帧与切镜检测结果回读
         D3D11_BUFFER_DESC sbd{};
-        sbd.ByteWidth = 8;
+        sbd.ByteWidth = 16;
         sbd.Usage = D3D11_USAGE_DEFAULT;
         sbd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
         sbd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        sbd.StructureByteStride = 8;
+        sbd.StructureByteStride = 16;
         if (FAILED(_dev11->CreateBuffer(&sbd, nullptr, _dupStatsGpu.Put()))) return false;
 
         D3D11_UNORDERED_ACCESS_VIEW_DESC uavd{};
@@ -279,7 +279,7 @@ public:
         if (FAILED(_dev11->CreateUnorderedAccessView(_dupStatsGpu.Get(), &uavd, _dupStatsUav.Put()))) return false;
 
         D3D11_BUFFER_DESC stgd{};
-        stgd.ByteWidth = 8;
+        stgd.ByteWidth = 16;
         stgd.Usage = D3D11_USAGE_STAGING;
         stgd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         if (FAILED(_dev11->CreateBuffer(&stgd, nullptr, _dupStatsStaging.Put()))) return false;
@@ -294,8 +294,9 @@ public:
         _height = h;
 
         UINT bind = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        // 关键兼容修复：B8G8R8A8_UNORM 在部分 AMD D3D11 驱动下不支持 Typed UAV 绑定（会导致 CreateTexture2D 返回 E_INVALIDARG），此处仅需 SRV！
         if (!CreateTex2D(_dev11.Get(), w, h, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, _candidateTex.Put(), _candidateSrv.Put())) return false;
-        if (!CreateTex2D(_dev11.Get(), w, h, DXGI_FORMAT_B8G8R8A8_UNORM, bind, _rawSrcTex.Put(), _rawSrcSrv.Put(), _rawSrcUav.Put())) return false;
+        if (!CreateTex2D(_dev11.Get(), w, h, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, _rawSrcTex.Put(), _rawSrcSrv.Put())) return false;
         if (!CreateTex2D(_dev11.Get(), w, h, DXGI_FORMAT_R16G16_FLOAT, bind, _projFlowTex.Put(), _projFlowSrv.Put(), _projFlowUav.Put())) return false;
         for (int i = 0; i < 2; ++i) {
             if (!CreateTex2D(_dev11.Get(), w, h, DXGI_FORMAT_R8G8B8A8_UNORM, bind, _enhancedTex[i].Put(), _enhancedSrv[i].Put(), _enhancedUav[i].Put())) return false;
@@ -347,20 +348,13 @@ public:
         _ctx11.Reset(); _dev11.Reset(); _adapter.Reset(); _factory.Reset();
     }
 
-    // 在进入 NVOFA 之前检测候选捕获帧是否为 Xbox 60fps 串流容器中的 30fps 编码重复帧或全局镜头切换
-    // 若不是重复帧，自动将 _candidateTex 晋升至 _rawSrcTex 供光流与 DLSS 5 使用
-    void CheckCandidateFrame(const EnhanceConfig& cfg, bool& outIsDuplicate, bool& outIsSceneCut) {
+    // 在进入光流引擎之前检测候选捕获帧是否为：全黑未就绪空表面、30-in-60 编码重复帧或全局镜头切换
+    void CheckCandidateFrame(const EnhanceConfig& cfg, bool& outIsDuplicate, bool& outIsSceneCut, bool* outIsAllBlack = nullptr) {
         outIsDuplicate = false;
         outIsSceneCut = false;
-
-        if (!_hasFirstReal) {
-            _ctx11->CopyResource(_rawSrcTex.Get(), _candidateTex.Get());
-            _hasFirstReal = true;
-            return;
-        }
+        if (outIsAllBlack) *outIsAllBlack = false;
 
         int sens = std::clamp(cfg.dedupSensitivity, 1, 10);
-        // 灵敏度 1..10 映射：默认 5 -> 单块阈值 0.015 (~3.8/255 灰阶，完全免疫 H.264 P帧蚊噪)，活跃块数门槛 7/4096
         float tileDiffThreshold = 0.0080f + float(sens) * 0.0014f;
         uint32_t minActiveTiles = (uint32_t)(2 + sens);
         double maxDupMeanDiff = 0.0025 + double(sens) * 0.0008;
@@ -372,7 +366,8 @@ public:
         } dcb{ _width, _height, tileDiffThreshold, 0u };
         _ctx11->UpdateSubresource(_cbDedup.Get(), 0, nullptr, &dcb, 0, 0);
 
-        ID3D11ShaderResourceView* srvs[2]{ _candidateSrv.Get(), _rawSrcSrv.Get() };
+        ID3D11ShaderResourceView* prevRefSrv = _hasFirstReal ? _rawSrcSrv.Get() : _candidateSrv.Get();
+        ID3D11ShaderResourceView* srvs[2]{ _candidateSrv.Get(), prevRefSrv };
         ID3D11UnorderedAccessView* uavs[1]{ _dupStatsUav.Get() };
         ID3D11Buffer* cbs[1]{ _cbDedup.Get() };
 
@@ -392,17 +387,31 @@ public:
         D3D11_MAPPED_SUBRESOURCE mp{};
         uint32_t activeTiles = 4096u;
         uint32_t sumDiffFixed = 0u;
+        uint32_t maxLumaFixed = 65535u;
         if (SUCCEEDED(_ctx11->Map(_dupStatsStaging.Get(), 0, D3D11_MAP_READ, 0, &mp))) {
             const uint32_t* p = reinterpret_cast<const uint32_t*>(mp.pData);
             activeTiles = p[0];
             sumDiffFixed = p[1];
+            maxLumaFixed = p[3];
             _ctx11->Unmap(_dupStatsStaging.Get(), 0);
+        }
+
+        // 若捕获表面全屏中央 4096 采样点最高亮度不足 1.5/255 (<0.006)，判定为空黑帧（如流未解码或格式不兼容），严禁遮盖底层窗口！
+        if (double(maxLumaFixed) / 65535.0 < 0.006) {
+            if (outIsAllBlack) *outIsAllBlack = true;
+            return;
+        }
+
+        if (!_hasFirstReal) {
+            _ctx11->CopyResource(_rawSrcTex.Get(), _candidateTex.Get());
+            _hasFirstReal = true;
+            return;
         }
 
         double meanDiff = (double(sumDiffFixed) / 65536.0) / 4096.0;
         if (cfg.dedup30In60 && activeTiles < minActiveTiles && meanDiff < maxDupMeanDiff) {
             outIsDuplicate = true;
-            return; // 丢弃编码重复帧，绝不污染 NVOFA 光流历史！
+            return; // 丢弃编码重复帧，绝不污染光流历史！
         }
 
         outIsSceneCut = (meanDiff > double(cfg.fgSceneCutThreshold));
@@ -693,6 +702,7 @@ public:
     uint32_t Width() const { return _width; }
     uint32_t Height() const { return _height; }
     bool TearingSupported() const { return _tearingSupported; }
+    bool IsAmdGpu() const { return _isAmd; }
     bool Dlss5Ready() const { return _dlss5.IsReady() || _amdRelight.IsReady(); }
     bool IsNativeNgxDlss5() const { return _dlss5.IsReady(); }
     bool NvofaActive() const { return _opticalFlow.IsHardwareNvofa(); }
@@ -1301,9 +1311,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // 默认采用 v3 久经验证的 DXGI Output Duplication + WDA_EXCLUDEFROMCAPTURE 零遮挡满帧捕获管线（确保 X2 插帧 100% 稳定丝滑）；
-    // 当用户按 F9 启动内置录屏或开启 OBS 兼容开关 (obsCaptureCompat = true) 时，无缝热切换至 WGC + WDA_NONE + Alpha 254 防 DWM 遮挡录屏模式！
+    // AMD 显卡 / Ryzen 双显卡混合输出 / HDR / 10-Bit 显示器防黑屏捕获架构：
+    // - AMD 显卡默认优先走 WGC + Alpha 254 单窗口直通捕获（原生绕过 Hybrid GPU DXGI_ERROR_UNSUPPORTED、10-bit/HDR 格式黑屏及 Adrenalin MPO 脏矩形丢失！）
+    // - NVIDIA 显卡默认走 DXGI Output Duplication，若检测到 Optimus 核显混合输出失败、非 BGRA8 HDR 桌面或超时空黑帧，亦全自动无缝切换至 WGC！
     WindowGraphicsCapturer wgcCapturer;
+    bool autoForceWgc = pipe.IsAmdGpu();
+    bool wgcUnsupported = false;
     bool useWgc = false;
     SetWindowDisplayAffinity(overlayHwnd, WDA_EXCLUDEFROMCAPTURE);
 
@@ -1347,8 +1360,6 @@ int main(int argc, char** argv) {
     rebuildRtv();
 
     DesktopDuplicator duplicator;
-    duplicator.InitializeForRect(pipe.Factory(), pipe.Adapter(), pipe.Device11(), pipe.Context11(), vpRect, curW, curH);
-
     bool overlayVisible = false;
     RECT lastAppliedVp = vpRect;
 
@@ -1360,6 +1371,8 @@ int main(int argc, char** argv) {
         return double(c.QuadPart) / double(qpcFreq.QuadPart);
     };
 
+    double engineStartTime = nowSec();
+    double lastValidNonBlackTime = engineStartTime;
     double lastRealArrival = nowSec();
     double avgRealInterval = 1.0 / 30.0; // 默认按 30fps 主机游戏步调初始化，若为真 60fps 会在 3 帧内自适应收敛至 16.67ms
     bool pendingSecondFrame = false;
@@ -1425,20 +1438,30 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // 动态热切换日常满帧 DXGI 捕获模式 vs 录屏直通 WGC 模式（Alpha 254 彻底避开 Windows 11 DWM 全不透明窗口遮挡降帧节流！）
-        if (cfg.obsCaptureCompat && !useWgc) {
+        // 动态热切换 DXGI 捕获模式 vs WGC 单窗口免回环模式（AMD / 混合显卡 / HDR / F9 录屏均走 WGC + Alpha 254）
+        bool wantWgc = (cfg.obsCaptureCompat || autoForceWgc) && !wgcUnsupported;
+        if (wantWgc && !useWgc) {
             if (wgcCapturer.Initialize(pipe.Device11(), targetHwnd)) {
                 useWgc = true;
                 duplicator.Reset();
                 SetLayeredWindowAttributes(overlayHwnd, 0, 254, LWA_ALPHA);
                 SetWindowDisplayAffinity(overlayHwnd, WDA_NONE);
+            } else {
+                wgcUnsupported = true;
+                autoForceWgc = false;
             }
-        } else if (!cfg.obsCaptureCompat && useWgc) {
+        } else if (!wantWgc && useWgc) {
             wgcCapturer.Shutdown();
             useWgc = false;
             SetWindowDisplayAffinity(overlayHwnd, WDA_EXCLUDEFROMCAPTURE);
             SetLayeredWindowAttributes(overlayHwnd, 0, 255, LWA_ALPHA);
-            duplicator.InitializeForRect(pipe.Factory(), pipe.Adapter(), pipe.Device11(), pipe.Context11(), newVp, curW, curH);
+            if (!duplicator.InitializeForRect(pipe.Factory(), pipe.Adapter(), pipe.Device11(), pipe.Context11(), newVp, curW, curH)) {
+                if (wgcCapturer.Initialize(pipe.Device11(), targetHwnd)) {
+                    useWgc = true;
+                    SetLayeredWindowAttributes(overlayHwnd, 0, 254, LWA_ALPHA);
+                    SetWindowDisplayAffinity(overlayHwnd, WDA_NONE);
+                }
+            }
         }
 
         // 同步窗口位置与尺寸变化
@@ -1457,7 +1480,9 @@ int main(int argc, char** argv) {
                 rebuildRtv();
                 pipe.ResizeResources(curW, curH);
                 if (!useWgc) {
-                    duplicator.InitializeForRect(pipe.Factory(), pipe.Adapter(), pipe.Device11(), pipe.Context11(), newVp, curW, curH);
+                    if (!duplicator.InitializeForRect(pipe.Factory(), pipe.Adapter(), pipe.Device11(), pipe.Context11(), newVp, curW, curH)) {
+                        autoForceWgc = true;
+                    }
                 }
                 pendingSecondFrame = false;
             }
@@ -1488,20 +1513,20 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (!overlayVisible) {
-            ShowWindow(overlayHwnd, SW_SHOWNA);
-            SetWindowPos(overlayHwnd, HWND_TOPMOST, newVp.left, newVp.top, (int)curW, (int)curH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            overlayVisible = true;
-        }
-
+        // 核心防黑屏门控：严禁在尚未捕获并渲染出真实非黑游戏帧之前提前 ShowWindow(overlayHwnd)！
+        // 只有在 sc1->Present() 真正将增强后的非黑游戏画面提交到交换链后才显示覆盖窗口，彻底根除一切黑屏遮挡！
         auto presentNow = [&](bool isGenerated) {
-            if (!backBufferRtv) return;
+            if (!backBufferRtv || !hasAnyCapturedFrame) return;
             bool tear = cfg.allowTearing && pipe.TearingSupported();
-            // 开启 Allow Tearing (SyncInterval=0) 时无需阻塞等待 VBlank，消除最高 4ms 交换链排队延迟
             if (waitableSwapChain && !tear) WaitForSingleObject(waitableSwapChain, 2);
             pipe.RenderToRtv(backBufferRtv.Get(), isGenerated, cfg);
             sc1->Present(tear ? 0 : 1, tear ? DXGI_PRESENT_ALLOW_TEARING : 0);
             ++outFrameCount;
+            if (!overlayVisible) {
+                ShowWindow(overlayHwnd, SW_SHOWNA);
+                SetWindowPos(overlayHwnd, HWND_TOPMOST, newVp.left, newVp.top, (int)curW, (int)curH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                overlayVisible = true;
+            }
         };
 
         // 检查是否到达排期的第 2 帧上屏时刻（X2 补帧半周期微秒级精准均匀输出）
@@ -1538,7 +1563,13 @@ int main(int argc, char** argv) {
             cfgDirty.store(false);
         }
 
-        // 捕获最新视频视口纹理（优先走 WGC 单窗口零回环可录屏路径，兜底走 DXGI Desktop Duplication）
+        // 若 DXGI Desktop Duplication 启动超过 450ms 仍未捕获到任何非黑游戏帧（如遇到 MPO 叠加层或混合显卡限制），自动无缝热切换至 WGC！
+        if (!useWgc && !autoForceWgc && !wgcUnsupported && !hasAnyCapturedFrame && (tNow - engineStartTime > 0.45)) {
+            autoForceWgc = true;
+            continue;
+        }
+
+        // 捕获最新视频视口纹理
         double qpcCapStart = nowSec();
         bool copiedOk = false;
 
@@ -1550,7 +1581,11 @@ int main(int argc, char** argv) {
         } else {
             if (!duplicator.dup) {
                 if (!duplicator.InitializeForRect(pipe.Factory(), pipe.Adapter(), pipe.Device11(), pipe.Context11(), newVp, curW, curH)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(8));
+                    if (!wgcUnsupported) {
+                        autoForceWgc = true;
+                    } else {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+                    }
                     continue;
                 }
             }
@@ -1559,7 +1594,9 @@ int main(int argc, char** argv) {
             ComRef<IDXGIResource> deskRes;
             HRESULT hrDup = duplicator.dup->AcquireNextFrame(1, &fi, deskRes.Put());
             if (hrDup == DXGI_ERROR_ACCESS_LOST || hrDup == DXGI_ERROR_INVALID_CALL) {
-                duplicator.InitializeForRect(pipe.Factory(), pipe.Adapter(), pipe.Device11(), pipe.Context11(), newVp, curW, curH);
+                if (!duplicator.InitializeForRect(pipe.Factory(), pipe.Adapter(), pipe.Device11(), pipe.Context11(), newVp, curW, curH)) {
+                    autoForceWgc = true;
+                }
             } else if (SUCCEEDED(hrDup) && deskRes) {
                 bool touchedViewport = false;
                 if (fi.TotalMetadataBufferSize > 0) {
@@ -1585,26 +1622,35 @@ int main(int argc, char** argv) {
                             }
                         }
                     }
+                } else if (fi.LastPresentTime.QuadPart != 0 || fi.AccumulatedFrames > 0) {
+                    // 兼容 DirectFlip / 硬件全屏翻转不汇报 DirtyRects (TotalMetadataBufferSize == 0) 的显卡驱动
+                    touchedViewport = true;
                 }
 
-                if (touchedViewport && fi.LastPresentTime.QuadPart != 0) {
+                if (touchedViewport && (fi.LastPresentTime.QuadPart != 0 || fi.AccumulatedFrames > 0)) {
                     qpcCapStart = nowSec();
                     ComRef<ID3D11Texture2D> deskTex;
                     if (SUCCEEDED(deskRes->QueryInterface(__uuidof(ID3D11Texture2D), (void**)deskTex.Put()))) {
                         D3D11_TEXTURE2D_DESC dDesc{};
                         deskTex->GetDesc(&dDesc);
-                        int srcX = std::clamp<int>(newVp.left - duplicator.monitorRect.left, 0, std::max<int>(0, (int)dDesc.Width - (int)curW));
-                        int srcY = std::clamp<int>(newVp.top - duplicator.monitorRect.top, 0, std::max<int>(0, (int)dDesc.Height - (int)curH));
-                        D3D11_BOX box{ (UINT)srcX, (UINT)srcY, 0, (UINT)(srcX + curW), (UINT)(srcY + curH), 1 };
-
-                        if (!duplicator.crossAdapter) {
-                            pipe.Context11()->CopySubresourceRegion(pipe.CandidateTex(), 0, 0, 0, 0, deskTex.Get(), 0, &box);
+                        // 若显示器处于 Windows HDR (R16G16B16A16_FLOAT) 或 AMD 10-Bit 色深 (R10G10B10A2_UNORM)，
+                        // D3D11 CopySubresourceRegion 至 BGRA8 会被静默丢弃导致全黑！立即切往 WGC 由 DWM 硬件自动转换色深！
+                        if (dDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && dDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
+                            autoForceWgc = true;
                         } else {
-                            duplicator.captureCtx->CopySubresourceRegion(duplicator.crossSharedCapture.Get(), 0, 0, 0, 0, deskTex.Get(), 0, &box);
-                            duplicator.captureCtx->Flush();
-                            pipe.Context11()->CopyResource(pipe.CandidateTex(), duplicator.crossSharedRender.Get());
+                            int srcX = std::clamp<int>(newVp.left - duplicator.monitorRect.left, 0, std::max<int>(0, (int)dDesc.Width - (int)curW));
+                            int srcY = std::clamp<int>(newVp.top - duplicator.monitorRect.top, 0, std::max<int>(0, (int)dDesc.Height - (int)curH));
+                            D3D11_BOX box{ (UINT)srcX, (UINT)srcY, 0, (UINT)(srcX + curW), (UINT)(srcY + curH), 1 };
+
+                            if (!duplicator.crossAdapter) {
+                                pipe.Context11()->CopySubresourceRegion(pipe.CandidateTex(), 0, 0, 0, 0, deskTex.Get(), 0, &box);
+                            } else {
+                                duplicator.captureCtx->CopySubresourceRegion(duplicator.crossSharedCapture.Get(), 0, 0, 0, 0, deskTex.Get(), 0, &box);
+                                duplicator.captureCtx->Flush();
+                                pipe.Context11()->CopyResource(pipe.CandidateTex(), duplicator.crossSharedRender.Get());
+                            }
+                            copiedOk = true;
                         }
-                        copiedOk = true;
                     }
                 }
                 duplicator.dup->ReleaseFrame();
@@ -1613,13 +1659,25 @@ int main(int argc, char** argv) {
 
         if (copiedOk) {
             ++rawCaptureCount;
-            bool isDup = false, isSceneCut = false;
-            pipe.CheckCandidateFrame(cfg, isDup, isSceneCut);
+            bool isDup = false, isSceneCut = false, isAllBlack = false;
+            pipe.CheckCandidateFrame(cfg, isDup, isSceneCut, &isAllBlack);
 
-            if (isDup) {
-                // 命中 Xbox 60fps 串流容器中的 30fps 编码重复帧！直接过滤，保护 NVOFA 真实 30fps 位移与半周期补帧节奏
+            if (isAllBlack) {
+                // 若连续超过 0.8s 仅抓到全黑表面（例如退回加载黑场或底层捕获失效），自动收起覆盖层露出原始画面，绝不锁死黑屏！
+                if (!useWgc && !autoForceWgc && (nowSec() - lastValidNonBlackTime > 0.45)) {
+                    autoForceWgc = true;
+                }
+                if (overlayVisible && (nowSec() - lastValidNonBlackTime > 0.80)) {
+                    ShowWindow(overlayHwnd, SW_HIDE);
+                    overlayVisible = false;
+                    pendingSecondFrame = false;
+                }
+            } else if (isDup) {
+                lastValidNonBlackTime = nowSec();
+                // 命中 Xbox 60fps 串流容器中的 30fps 编码重复帧！直接过滤，保护光流真实 30fps 位移与半周期补帧节奏
                 ++dupSkippedCount;
             } else {
+                lastValidNonBlackTime = nowSec();
                 hasAnyCapturedFrame = true;
 
                 // 若上一帧的半周期真实帧还没上屏但新真实帧已赶到：确保第 1 帧在屏幕上至少完整驻留过 8.5ms (防 FLIP_DISCARD 瞬时覆盖吞帧！) 后再补齐第 2 帧

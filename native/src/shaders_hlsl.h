@@ -3,12 +3,13 @@
 
 namespace XShaders {
 
-// 0. 30-in-60 串流重复帧高速抗噪检测与全局切镜检测着色器（单线程组 4,096 块 3x3 滤波归约，耗时 < 0.01ms）
+// 0. 30-in-60 串流重复帧高速抗噪检测、全黑空帧识别与全局切镜检测着色器（单线程组 4,096 块 3x3 滤波归约，耗时 < 0.01ms）
 static const char* HLSL_DETECT_DUPLICATE = R"hlsl(
 Texture2D<float4> CandTex : register(t0);
 Texture2D<float4> PrevTex : register(t1);
 
-RWStructuredBuffer<uint2> OutStats : register(u0); // [0].x = activeChangedTiles (0..4096), [0].y = sumDiffFixed
+// [0].x = activeChangedTiles (0..4096), [0].y = sumDiffFixed, [0].z = sumCandLumaFixed, [0].w = maxCandLumaFixed
+RWStructuredBuffer<uint4> OutStats : register(u0);
 
 cbuffer DedupCB : register(b0) {
     uint2 Extent;
@@ -18,6 +19,8 @@ cbuffer DedupCB : register(b0) {
 
 groupshared uint gsActive[256];
 groupshared uint gsDiff[256];
+groupshared uint gsLuma[256];
+groupshared uint gsMaxLuma[256];
 
 float SampleBox3x3Luma(Texture2D<float4> tex, int2 center) {
     float sum = 0.0;
@@ -35,6 +38,8 @@ float SampleBox3x3Luma(Texture2D<float4> tex, int2 center) {
 void CSMain(uint3 gtid : SV_GroupThreadID, uint flatIdx : SV_GroupIndex) {
     uint activeCount = 0;
     uint diffAccum = 0;
+    uint lumaAccum = 0;
+    uint maxLuma = 0;
 
     // 采样中央 84% 游戏核心画面（避开四角网络状态小图标闪烁干扰），共 64x64 = 4096 个采样区
     float2 minUv = float2(0.08, 0.08);
@@ -54,23 +59,30 @@ void CSMain(uint3 gtid : SV_GroupThreadID, uint flatIdx : SV_GroupIndex) {
                 activeCount += 1;
             }
             diffAccum += uint(d * 65536.0);
+            uint lf = uint(saturate(lc) * 65535.0);
+            lumaAccum += lf;
+            maxLuma = max(maxLuma, lf);
         }
     }
 
     gsActive[flatIdx] = activeCount;
     gsDiff[flatIdx] = diffAccum;
+    gsLuma[flatIdx] = lumaAccum;
+    gsMaxLuma[flatIdx] = maxLuma;
     GroupMemoryBarrierWithGroupSync();
 
     [unroll] for (uint stride = 128; stride > 0; stride >>= 1) {
         if (flatIdx < stride) {
             gsActive[flatIdx] += gsActive[flatIdx + stride];
             gsDiff[flatIdx] += gsDiff[flatIdx + stride];
+            gsLuma[flatIdx] += gsLuma[flatIdx + stride];
+            gsMaxLuma[flatIdx] = max(gsMaxLuma[flatIdx], gsMaxLuma[flatIdx + stride]);
         }
         GroupMemoryBarrierWithGroupSync();
     }
 
     if (flatIdx == 0) {
-        OutStats[0] = uint2(gsActive[0], gsDiff[0]);
+        OutStats[0] = uint4(gsActive[0], gsDiff[0], gsLuma[0], gsMaxLuma[0]);
     }
 }
 )hlsl";

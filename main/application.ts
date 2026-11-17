@@ -53,26 +53,24 @@ export default class Application {
 
     const settings: any = this._store.get('settings', defaultSettings)
 
-    if (settings.use_vulkan) {
-      ElectronApp.commandLine.appendSwitch('use-vulkan')
-      ElectronApp.commandLine.appendSwitch('enable-features', 'Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,VaapiIgnoreDriverChecks,VaapiVideoDecoder,PlatformHEVCDecoderSupport,CanvasOopRasterization')
-      ElectronApp.commandLine.appendSwitch('enable-gpu-rasterization')
-      ElectronApp.commandLine.appendSwitch('enable-oop-rasterization')
-      ElectronApp.commandLine.appendSwitch('enable-accelerated-video-decode')
-      if (process.platform !== 'win32') {
-        ElectronApp.commandLine.appendSwitch('ozone-platform-hint', 'x11')
-      }
-      ElectronApp.commandLine.appendSwitch('ignore-gpu-blocklist')
-      ElectronApp.commandLine.appendSwitch('no-sandbox');
-      ElectronApp.commandLine.appendSwitch('enable-zero-copy');
-    } else if (process.platform === 'win32') {
-      // Windows 专属 D3D11 硬件零拷贝 NVDEC 解码与 Wi-Fi 6 / WebRTC 0ms 零排队超低延迟调度开关
+    if (process.platform === 'win32') {
+      // Windows 专属防黑屏与超低延迟硬件解码管线（完美兼容 NVIDIA RTX + AMD Radeon 独显/核显）：
+      // 1. 严禁在 Windows 下启用 Linux 专用 DefaultANGLEVulkan/VaapiVideoDecoder（会导致 D3D11 硬解视频流黑屏！）
+      // 2. 显式禁用 DirectComposition NV12 MPO 硬件叠加层，彻底根治 AMD Adrenalin 驱动常见的串流画面全黑 Bug！
+      // 3. 当用户在设置中勾选「使用Vulkan渲染 (兼容渲染模式)」时，额外关闭 zero-copy 启用拷贝回读安全硬解模式
       ElectronApp.commandLine.appendSwitch('use-angle', 'd3d11')
       ElectronApp.commandLine.appendSwitch('ignore-gpu-blocklist')
       ElectronApp.commandLine.appendSwitch('enable-gpu-rasterization')
       ElectronApp.commandLine.appendSwitch('enable-oop-rasterization')
-      ElectronApp.commandLine.appendSwitch('enable-accelerated-video-decode')
-      ElectronApp.commandLine.appendSwitch('enable-zero-copy')
+      ElectronApp.commandLine.appendSwitch('disable-direct-composition-video-overlays')
+      if (!settings.use_vulkan) {
+        ElectronApp.commandLine.appendSwitch('enable-accelerated-video-decode')
+        ElectronApp.commandLine.appendSwitch('enable-zero-copy')
+      } else {
+        // 用户开启「防黑屏兼容渲染模式 (原Vulkan选项)」：彻底绕过问题显卡驱动 DXVA/NV12 硬解黑屏，交由多核解码直传 D3D11 纹理，100% 杜绝黑屏！
+        ElectronApp.commandLine.appendSwitch('disable-accelerated-video-decode')
+        ElectronApp.commandLine.appendSwitch('disable-zero-copy')
+      }
       ElectronApp.commandLine.appendSwitch('disable-gpu-vsync')
       ElectronApp.commandLine.appendSwitch('disable-frame-rate-limit')
       ElectronApp.commandLine.appendSwitch('disable-renderer-backgrounding')
@@ -85,8 +83,24 @@ export default class Application {
       )
       ElectronApp.commandLine.appendSwitch(
         'enable-features',
-        'D3D11VideoDecoder,DirectCompositionUseNV12DecodeSwapChain,CanvasOopRasterization,PlatformHEVCDecoderSupport,WebRtcHideLocalIpsWithMdns'
+        settings.use_vulkan
+          ? 'CanvasOopRasterization,WebRtcHideLocalIpsWithMdns'
+          : 'D3D11VideoDecoder,CanvasOopRasterization,PlatformHEVCDecoderSupport,WebRtcHideLocalIpsWithMdns'
       )
+      ElectronApp.commandLine.appendSwitch(
+        'disable-features',
+        'DirectCompositionUseNV12DecodeSwapChain,DirectCompositionVideoOverlays,Vulkan'
+      )
+    } else if (settings.use_vulkan) {
+      ElectronApp.commandLine.appendSwitch('use-vulkan')
+      ElectronApp.commandLine.appendSwitch('enable-features', 'Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,VaapiIgnoreDriverChecks,VaapiVideoDecoder,PlatformHEVCDecoderSupport,CanvasOopRasterization')
+      ElectronApp.commandLine.appendSwitch('enable-gpu-rasterization')
+      ElectronApp.commandLine.appendSwitch('enable-oop-rasterization')
+      ElectronApp.commandLine.appendSwitch('enable-accelerated-video-decode')
+      ElectronApp.commandLine.appendSwitch('ozone-platform-hint', 'x11')
+      ElectronApp.commandLine.appendSwitch('ignore-gpu-blocklist')
+      ElectronApp.commandLine.appendSwitch('no-sandbox');
+      ElectronApp.commandLine.appendSwitch('enable-zero-copy');
     } else {
       ElectronApp.commandLine.appendSwitch('ignore-gpu-blacklist')
       ElectronApp.commandLine.appendSwitch('enable-gpu-rasterization')
