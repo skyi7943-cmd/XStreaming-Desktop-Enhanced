@@ -11,6 +11,12 @@
   <img src="https://img.shields.io/badge/Console-Xbox%20Series%20S%20%7C%20Series%20X-107C10?style=flat-square&logo=xbox" alt="Xbox Series X|S" />
 </p>
 
+<p align="center">
+  <a href="https://github.com/skyi7943-cmd/XStreaming-Desktop-Enhanced/releases/download/v1.10.3-dlss5-v6/XStreaming-Desktop-Enhanced-v1.10.3-dlss5-Win64-Portable.zip">
+    <img src="https://img.shields.io/badge/%E2%AC%87%EF%B8%8F%20%E7%AB%8B%E5%8D%B3%E4%B8%8B%E8%BD%BD%E7%BB%BF%E8%89%B2%E5%85%8D%E5%AE%89%E8%A3%85%E5%AE%8C%E6%95%B4%E7%89%88-Win64%20Portable%20(246.9%20MB)-10B981?style=for-the-badge" alt="立即下载绿色免安装完整版" />
+  </a>
+</p>
+
 ---
 
 ## ✨ 项目简介
@@ -31,7 +37,7 @@ Xbox Series S 最大的遗憾是大量次世代 3A 大作（如《荒野大镖�
 
 使用 **XStreaming Desktop Enhanced** 连接 Xbox Series S 后，你可以直接做到：
 - **🔓 锁 30 帧游戏 → 满血真 60 FPS 丝滑畅玩**：
-  Xbox 串流协议无论游戏内部是 30 帧还是 60 帧，都会固定封装进 60Hz 视频流里（即 `A, A, B, B` 重复帧），导致市面上普通外部补帧工具全部失效或卡成重影。本客户端内置 **GPU 4,096 分块抗 H.264 蚊噪重复帧剥离引擎 (`30-in-60 Dedup`)**，在进入 NVOFA 硬件光流前精准剔除编码重复帧，提取出纯净真 30 FPS 序列并以微秒级半周期排期生成 **50% 几何真中点补帧**——让锁 30 帧的 XSS 游戏瞬间拥有 **真 60 FPS 的丝滑视角转动**！
+  Xbox 串流协议无论游戏内部是 30 帧还是 30/60 混合帧，都会固定封装进 60Hz 视频流里（即 `A, A, B, B` 重复帧），导致市面上普通外部补帧工具全部失效或卡成重影。本客户端内置 **GPU 4,096 分块抗 H.264 蚊噪重复帧剥离引擎 (`30-in-60 Dedup`)**，在进入 NVOFA 硬件光流前精准剔除编码重复帧，提取出纯净真 30 FPS 序列并以微秒级半周期排期生成 **50% 几何真中点补帧**——让锁 30 帧的 XSS 游戏瞬间拥有 **真 60 FPS 的丝滑视角转动**！
 - **🧠 900p 糊画质 → 真 DLSS 5 神经光影与微表面重塑**：
   直接调用电脑 RTX 显卡运行真 **`nvngx_dlssnr.dll` (DLSS 5 Feature 18)**，支持 **单层极速** 与 **双层显存串联精雕 (`Pass 1 → Pass 2`)**，重塑柏油路面颗粒、植被层次、车漆高光反射与岩石纹理，一键切换 **「自然均衡 / 鲜明通透 / 电影光影」** 三大神经风格，叠加 **CAS / FSR RCAS 去宏块锐化**，彻底洗掉 XSS 低内部分辨率与 H.264 码率带来的灰蒙感！
 
@@ -106,9 +112,9 @@ Xbox Series S 最大的遗憾是大量次世代 3A 大作（如《荒野大镖�
 - **操作系统**：Windows 10 / Windows 11 64 位（推荐 Windows 11 22H2 及以上）
 - **显卡要求**：NVIDIA GeForce RTX 显卡（推荐 RTX 30 / 40 / 50 系列，最新 Game Ready 驱动以启用真 `nvngx_dlssnr.dll` Feature 18 与 NVOFA 硬件光流；非 RTX 显卡亦内置 Compute Shader 光流 + CAS/RCAS 锐化自动回退）
 
-### 开箱即用（Release 绿色版）
-1. 前往本仓库 [**Releases**](../../releases) 页面下载最新绿色解压包（或下载 `nvngx_dlssnr.dll` 放入 `native/bin/` 与打包目录 `resources/native/` 下）；
-2. 双击运行 `XStreaming.exe`，登录微软 Xbox 账号连接你的 **Xbox Series S** 或 **Xbox Series X**，进入串流即自动挂载增强引擎！
+### 开箱即用（Release 绿色免安装完整版）
+1. 直接点击下载 [**XStreaming-Desktop-Enhanced-v1.10.3-dlss5-Win64-Portable.zip (246.9 MB)**](https://github.com/skyi7943-cmd/XStreaming-Desktop-Enhanced/releases/download/v1.10.3-dlss5-v6/XStreaming-Desktop-Enhanced-v1.10.3-dlss5-Win64-Portable.zip)（已完整内置 `XStreaming.exe` + 原生超低延迟引擎 + `nvngx_dlssnr.dll` 真 DLSS 5 运行库，无需安装任何开发环境）；
+2. 解压后双击运行 `win-unpacked\XStreaming.exe`，登录微软 Xbox 账号连接你的 **Xbox Series S** 或 **Xbox Series X**，进入串流即自动挂载增强引擎！
 
 ### 从源码编译构建
 
