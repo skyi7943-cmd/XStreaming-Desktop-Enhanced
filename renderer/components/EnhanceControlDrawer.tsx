@@ -17,6 +17,7 @@ import Ipc from "../lib/ipc";
 import {
   DEFAULT_ENHANCE_SETTINGS,
   ENHANCE_PRESETS,
+  FG_MODEL_OPTIONS,
   EnhanceSettings,
   EnhanceTelemetry,
   Wifi6JitterMode,
@@ -96,6 +97,10 @@ export default function EnhanceControlDrawer({
   const totalAddedMs = Number(telemetry?.totalAddedMs ?? gpuPipeMs + fgHoldMs);
   const dlss5HostMs = Number(telemetry?.dlss5HostMs ?? 0);
   const activePasses = Number(telemetry?.dlss5Passes ?? settings.dlss5Passes ?? 1);
+  const activeFgMult = Number(telemetry?.fgMultiplier ?? settings.fgMultiplier ?? 2);
+  const activeFgModel = Number(telemetry?.fgModel ?? settings.fgModel ?? 0);
+  const activeFgModelName =
+    FG_MODEL_OPTIONS.find((m) => m.id === activeFgModel)?.shortName || "均衡全能";
   const dupCount = telemetry?.dupSkipped || 0;
   const is30In60Detected = isStreaming && dupCount >= 5;
   const detectedBackend = telemetry?.nrBackend || selfTestResult?.nrBackend || "";
@@ -131,8 +136,8 @@ export default function EnhanceControlDrawer({
                   {isSteamDeck
                     ? "🎮 Steam Deck 光影精雕 + 真 X2 补帧中心"
                     : isRadeonNr
-                    ? "🔴 AMD Radeon 光影精雕 + 真 X2 补帧中心"
-                    : "🚀 DLSS 5 (双层叠加) + 真 X2 补帧中心"}
+                    ? "🔴 AMD Radeon 光影精雕 + 2X/3X 多模型补帧中心"
+                    : "🚀 DLSS 5 (双层) + 2X/3X 多模型补帧中心"}
                 </span>
                 <Chip size="sm" color={settings.enabled ? "success" : "default"} variant="flat">
                   {settings.enabled ? "运行中" : "已旁路"}
@@ -183,7 +188,8 @@ export default function EnhanceControlDrawer({
                 <div className="space-y-2 pt-1">
                   {is30In60Detected && (
                     <div className="rounded-lg bg-emerald-950/60 border border-emerald-500/40 px-2.5 py-1.5 text-[11px] text-emerald-300 font-medium">
-                      🎯 已识别 Xbox 60Hz 串流容器内的 <b>30帧游戏</b>：每秒滤除 <b>{dupCount}</b> 个编码重复帧，正在执行真 30→60 光流补帧！
+                      🎯 已识别 Xbox 60Hz 串流容器内的 <b>30帧游戏</b>：每秒滤除 <b>{dupCount}</b> 个编码重复帧，正在执行{" "}
+                      <b>真 {activeFgMult === 3 ? "3X (30→90)" : "2X (30→60)"} · {activeFgModelName}</b> 光流补帧！
                     </div>
                   )}
                   <div className="grid grid-cols-2 gap-2">
@@ -191,7 +197,7 @@ export default function EnhanceControlDrawer({
                       <div className="text-[10px] text-zinc-400">
                         {is30In60Detected
                           ? `真游戏帧率 (容器 ${telemetry.rawFps?.toFixed(0) || 60}Hz)`
-                          : "实时帧率倍增"}
+                          : `实时帧率倍增 (${telemetry.fgActive ? `${activeFgMult}X · ${activeFgModelName}` : "直通"})`}
                       </div>
                       <div className="text-sm font-bold text-emerald-400">
                         {telemetry.srcFps?.toFixed(0) || "--"} → {telemetry.outFps?.toFixed(0) || "--"} FPS
@@ -234,13 +240,17 @@ export default function EnhanceControlDrawer({
                   {selfTestResult.selfTest ? (
                     <>
                       <div className="text-emerald-400 font-bold">
-                        ✅ 自检通过：{selfTestResult.nrBackend === "RadeonNR" ? "AMD RadeonNR 双层光影精雕 + 金字塔双向光流" : "双层 DLSS 5 + NVOFA 硬件光流"} + 录屏直通全部就绪
+                        ✅ 自检通过：{selfTestResult.nrBackend === "RadeonNR" ? "AMD RadeonNR 双层光影精雕 + 金字塔双向光流" : "双层 DLSS 5 + NVOFA 硬件光流"} + 2X/3X 四模型补帧就绪
                       </div>
                       <div className="text-zinc-300">
-                        黑夜最大偏差 <b>{selfTestResult.nightMaxAnomaly}/255</b> · 双层渲染{" "}
-                        <b>{selfTestResult.dlss5GpuMs}ms</b> · 球心中点{" "}
-                        <b>x={selfTestResult.midpointBallX}</b> · UI闪烁{" "}
-                        <b>{selfTestResult.uiFlickerDiff}</b>
+                        2X中点 <b>x={selfTestResult.midpointBallX}</b>
+                        {selfTestResult.x3BallPhase1 !== undefined && (
+                          <>
+                            {" "}· 3X双分位 <b>x={selfTestResult.x3BallPhase1}/{selfTestResult.x3BallPhase2}</b>
+                            {" "}· 模型校验 <b>{selfTestResult.fgModelsVerified || 4}/4</b>
+                          </>
+                        )}{" "}
+                        · UI闪烁 <b>{selfTestResult.uiFlickerDiff}</b>
                       </div>
                     </>
                   ) : (
@@ -316,7 +326,9 @@ export default function EnhanceControlDrawer({
             <div className="space-y-1.5">
               <div className="font-bold text-zinc-200">🎯 一键场景预设</div>
               <div className="grid grid-cols-1 gap-1.5">
-                {Object.entries(ENHANCE_PRESETS).map(([key, item]) => (
+                {Object.entries(ENHANCE_PRESETS)
+                  .filter(([key]) => (isSteamDeck ? key !== "xbox30To90UltraHighRefresh" : key !== "steamDeckHandheld"))
+                  .map(([key, item]) => (
                   <button
                     key={key}
                     type="button"
@@ -415,15 +427,15 @@ export default function EnhanceControlDrawer({
               </div>
             </div>
 
-            {/* 2. 超低延迟 X2 插帧与 30-in-60 智能去重 */}
+            {/* 2. 超低延迟 2X/3X 多倍插帧、四大专用补帧模型与 30-in-60 智能去重 */}
             <div className="rounded-xl bg-zinc-900/70 border border-zinc-800 p-3 space-y-3">
               <div className="flex items-center justify-between">
                 <div>
                   <div className="font-bold text-emerald-400 text-xs">
-                    🚀 2. NVOFA 硬件光流真 X2 补帧 (专治串流60包30帧)
+                    🚀 2. 硬件光流真 2X / 3X 多模型补帧 (专治串流60包30帧)
                   </div>
                   <div className="text-[10px] text-zinc-400">
-                    无竞态双空间置信度合成 + 彩色 UI 锁频防闪烁
+                    支持 2X (30→60 / 60→120) 与 3X (30→90 / 60→180) + 4 大游戏类型专用模型
                   </div>
                 </div>
                 <Switch
@@ -436,6 +448,84 @@ export default function EnhanceControlDrawer({
 
               {settings.fgEnabled && (
                 <>
+                  {!isSteamDeck && (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-zinc-200 font-semibold">🔥 补帧倍率选择</span>
+                        <span className="text-[10px] text-emerald-400">
+                          {(settings.fgMultiplier ?? 2) === 3
+                            ? "高刷屏满血模式：30→90 / 60→180 FPS"
+                            : "黄金低延模式：30→60 / 60→120 FPS"}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <Button
+                          size="sm"
+                          color={(settings.fgMultiplier ?? 2) === 2 ? "success" : "default"}
+                          variant={(settings.fgMultiplier ?? 2) === 2 ? "solid" : "flat"}
+                          className="h-8 text-[11px] font-semibold"
+                          onPress={() => patchSettings({ fgMultiplier: 2 })}
+                        >
+                          🚀 2X 二倍补帧 (30→60 / 60→120)
+                        </Button>
+                        <Button
+                          size="sm"
+                          color={(settings.fgMultiplier ?? 2) === 3 ? "warning" : "default"}
+                          variant={(settings.fgMultiplier ?? 2) === 3 ? "solid" : "flat"}
+                          className={`h-8 text-[11px] font-bold ${
+                            (settings.fgMultiplier ?? 2) === 3 ? "text-black" : ""
+                          }`}
+                          onPress={() => patchSettings({ fgMultiplier: 3 })}
+                        >
+                          ⚡ 3X 三倍补帧 (30→90 / 60→180)
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {!isSteamDeck && (
+                    <div className="space-y-1.5">
+                      <div className="text-zinc-200 font-semibold">
+                        🧠 补帧算法模型切换 (针对不同游戏类型深度调校)
+                      </div>
+                      <div className="grid grid-cols-1 gap-1.5">
+                        {FG_MODEL_OPTIONS.map((m) => {
+                          const selected = (settings.fgModel ?? 0) === m.id;
+                          return (
+                            <button
+                              key={m.id}
+                              type="button"
+                              onClick={() => patchSettings({ fgModel: m.id })}
+                              className={`text-left rounded-lg px-2.5 py-2 border transition-all ${
+                                selected
+                                  ? "bg-emerald-950/70 border-emerald-400 shadow-sm"
+                                  : "bg-zinc-950/60 hover:bg-zinc-900 border-zinc-800 hover:border-zinc-700"
+                              }`}
+                            >
+                              <div className="flex items-center justify-between">
+                                <span
+                                  className={`text-[11px] font-bold ${
+                                    selected ? "text-emerald-300" : "text-zinc-200"
+                                  }`}
+                                >
+                                  {m.title}
+                                </span>
+                                {selected && (
+                                  <span className="text-[10px] font-bold text-emerald-400">
+                                    当前使用
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[10px] text-zinc-400 mt-0.5 leading-snug">
+                                {m.desc}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="rounded-lg bg-zinc-950/75 border border-emerald-500/30 p-2.5 space-y-2">
                     <div className="flex items-center justify-between">
                       <div>
@@ -469,7 +559,7 @@ export default function EnhanceControlDrawer({
                   </div>
 
                   <div className="space-y-1.5">
-                    <div className="text-zinc-300">低延迟插帧模式选择</div>
+                    <div className="text-zinc-300">低延迟插帧帧序模式</div>
                     <div className="grid grid-cols-2 gap-1.5">
                       <Button
                         size="sm"
@@ -478,7 +568,7 @@ export default function EnhanceControlDrawer({
                         className="h-8 text-[11px] font-semibold"
                         onPress={() => patchSettings({ fgMode: 1 })}
                       >
-                        🎯 双向真中点 X2 (30帧最丝滑)
+                        🎯 双向遮挡精插 {(settings.fgMultiplier ?? 2) === 3 ? "3X" : "2X"} (最丝滑)
                       </Button>
                       <Button
                         size="sm"
@@ -487,7 +577,7 @@ export default function EnhanceControlDrawer({
                         className="h-8 text-[11px] font-semibold"
                         onPress={() => patchSettings({ fgMode: 0 })}
                       >
-                        ⚡ 零等待外推 X2 (0ms 扣押)
+                        ⚡ 零等待外推 {(settings.fgMultiplier ?? 2) === 3 ? "3X" : "2X"} (0ms 扣押)
                       </Button>
                     </div>
                   </div>

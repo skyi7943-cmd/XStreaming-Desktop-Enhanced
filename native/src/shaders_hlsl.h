@@ -936,9 +936,9 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
 }
 )hlsl";
 
-// 6A. 零竞态光度自洽中点运动场汇聚着色器 (Race-Free Photometric Candidate Gather)：
+// 6A. 零竞态光度自洽任意相位 (2X: 1/2, 3X: 1/3 & 2/3) 运动场汇聚着色器 (支持 4 大专用补帧模型)：
 // 彻底废除多线程随机覆盖写入的 CSSplat，通过双向候选矢量汇聚与光度匹配竞选，
-// 既精准捕捉高速运动物体中点，又绝不允许快速旋转的背景运动矢量覆盖画面中心角色、武器或 UI！
+// 既精准捕捉 2X/3X 高速运动物体任意几何分位点，又绝不允许快速旋转的背景运动矢量覆盖画面中心角色、武器或 UI！
 static const char* HLSL_PROJECT_FLOW = R"hlsl(
 Texture2D<float2> FwdMotion : register(t0);
 Texture2D<float2> BwdMotion : register(t1);
@@ -952,10 +952,10 @@ RWTexture2D<float2> OutProjFlow : register(u0);
 cbuffer ProjCB : register(b0) {
     uint2  Extent;
     float2 InvExtent;
-    uint   FgMode; // 0 = 外推 t = N + 0.5, 1 = 内插 t = N - 0.5
+    uint   FgMode;       // 0 = 外推 t = N + Phase, 1 = 内插 Prev->Curr 相位 Phase (2X: 0.5, 3X: 1/3 & 2/3)
     float  Phase;
     uint   ExcludeCount;
-    uint   Pad0;
+    uint   FgModel;      // 0 = 均衡全能, 1 = 竞速大动态, 2 = 轮廓零果冻, 3 = 字幕UI强护盾
     uint4  ExcludeRects[6];
 };
 
@@ -989,7 +989,11 @@ float EvaluateFlowCandidate(float2 uv, float2 v, bool stationaryAnchored) {
         return vecErr * 0.025 + (1.0 - cAtC) * 0.15;
     }
 
-    float2 uvC = uv - v * Phase * InvExtent;
+    // 任意相位非对称精确几何映射 (Phase=0 对应 PrevFrame, Phase=1 对应 CurrFrame)：
+    // - 2X 模式 Phase=0.5 时 invPhase=0.5，与中点公式完全等价；
+    // - 3X 模式 Phase=1/3 时向 Curr 偏移 2/3*v、向 Prev 偏移 1/3*v；Phase=2/3 时向 Curr 偏移 1/3*v、向 Prev 偏移 2/3*v！
+    float invPhase = 1.0 - Phase;
+    float2 uvC = uv - v * invPhase * InvExtent;
     float2 uvP = uv + v * Phase * InvExtent;
     if (any(uvC < 0.0) || any(uvC > 1.0) || any(uvP < 0.0) || any(uvP > 1.0)) return 999.0;
 
@@ -1008,14 +1012,25 @@ float EvaluateFlowCandidate(float2 uv, float2 v, bool stationaryAnchored) {
     float maxVecErr = max(errC, errP);
 
     float cost = photoErr + 0.0035 * min(minVecErr, 28.0);
+    if (FgModel == 2) {
+        // 模型 2 (轮廓零果冻)：额外抑制两端光流剪切分叉，防止背景矢量渗入人物挥刀/发丝边缘
+        cost += 0.0022 * min(maxVecErr, 24.0);
+    }
 
     // 若当前位置本身已经是前后两帧完全吻合的静止角色/武器/UI结构，严禁远处高速背景跨帧覆盖它！
     float mag = length(v);
-    if (stationaryAnchored && mag > 3.5) {
-        cost += 0.25;
-    } else if (!stationaryAnchored && photoErr < 0.045 && maxVecErr < 4.5 && mag > 1.5) {
-        // 对于真正跨过空背景的前景高速运动物体（两端矢量与颜色均高度吻合），赋予微弱前景优先权
-        cost -= 0.012 * saturate(mag / 16.0);
+    float anchorMagLim = (FgModel == 3) ? 2.8 : ((FgModel == 2) ? 3.0 : 3.5);
+    if (stationaryAnchored && mag > anchorMagLim) {
+        cost += (FgModel >= 2) ? 0.36 : 0.25;
+    } else if (!stationaryAnchored) {
+        if (FgModel == 1) {
+            // 模型 1 (竞速射击大动态)：增强高速运动前景护栏/路牌/载具捕捉权重
+            if (photoErr < 0.055 && maxVecErr < 5.5 && mag > 1.5) {
+                cost -= 0.020 * saturate(mag / 14.0);
+            }
+        } else if (photoErr < 0.045 && maxVecErr < 4.5 && mag > 1.5) {
+            cost -= 0.012 * saturate(mag / 16.0);
+        }
     }
     return cost;
 }
@@ -1029,11 +1044,12 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
         return;
     }
     float2 uv = (float2(p) + 0.5) * InvExtent;
+    float invPhase = 1.0 - Phase;
 
     float2 vLocalFwd = FwdMotion.Load(int3(p, 0));
     float2 vLocalBwd = -BwdMotion.Load(int3(p, 0));
 
-    // 检测当前像素是否属于静止高结构实体（如第三人称中心人物、持枪手臂、HUD图标）
+    // 检测当前像素是否属于静止高结构实体（如第三人称中心人物、持枪手臂、HUD图标、字幕描边）
     float3 cc0 = CurrFrame.Load(int3(p, 0)).rgb;
     float3 cp0 = PrevFrame.Load(int3(p, 0)).rgb;
     float3 ccX = CurrFrame.Load(int3(clamp(p + int2(2, 0), int2(0,0), int2(Extent)-1), 0)).rgb;
@@ -1043,8 +1059,10 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
 
     float zeroDiff = max(MaxDiff3(cc0, cp0), max(MaxDiff3(ccX, cpX), MaxDiff3(ccY, cpY)));
     float localStruct = max(MaxDiff3(cc0, ccX), MaxDiff3(cc0, ccY));
-    bool stationaryAnchored = (zeroDiff < 0.032) && (localStruct > 0.035) &&
-                              (length(vLocalFwd) < 3.5) && (length(vLocalBwd) < 3.5);
+    float zeroThr = (FgModel == 3) ? 0.044 : ((FgModel == 2) ? 0.038 : 0.032);
+    float structThr = (FgModel == 3) ? 0.025 : ((FgModel == 2) ? 0.028 : 0.035);
+    bool stationaryAnchored = (zeroDiff < zeroThr) && (localStruct > structThr) &&
+                              (length(vLocalFwd) < 3.8) && (length(vLocalBwd) < 3.8);
 
     float2 bestV = float2(0.0, 0.0);
     float bestCost = EvaluateFlowCandidate(uv, bestV, stationaryAnchored);
@@ -1055,23 +1073,28 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
     float c2 = EvaluateFlowCandidate(uv, vLocalBwd, stationaryAnchored);
     if (c2 < bestCost) { bestCost = c2; bestV = vLocalBwd; }
 
-    // 8 方向多尺度确定性汇聚搜索（覆盖最高 ±68px 剧烈视角移动，零线程竞态闪烁！）
+    // 8 方向多尺度确定性汇聚搜索：
+    // - 默认模型 0/2/3 采用 3 层金字塔环 {8, 18, 32}；
+    // - 模型 1 (竞速射击大动态) 扩展至 4 层广域环 {6, 16, 30, 46}，最高捕捉 ±92px 超高速甩视角！
     const int2 dirs[8] = {
         int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1),
         int2(1, 1), int2(-1, 1), int2(1, -1), int2(-1, -1)
     };
-    const int radii[3] = { 8, 18, 32 };
+    const int radiiStd[4]  = { 8, 18, 32, 32 };
+    const int radiiWide[4] = { 6, 16, 30, 46 };
+    int numRings = (FgModel == 1) ? 4 : 3;
+    float coneScale = (FgModel == 1) ? 0.82 : 0.75;
 
-    [unroll] for (int rIdx = 0; rIdx < 3; ++rIdx) {
-        int rad = radii[rIdx];
-        float acceptDist = float(rad) * 0.75 + 4.0;
-        [unroll] for (int d = 0; d < 8; ++d) {
+    [loop] for (int rIdx = 0; rIdx < numRings; ++rIdx) {
+        int rad = (FgModel == 1) ? radiiWide[rIdx] : radiiStd[rIdx];
+        float acceptDist = float(rad) * coneScale + 4.5;
+        [loop] for (int d = 0; d < 8; ++d) {
             int2 q = clamp(p + dirs[d] * rad, int2(0, 0), int2(Extent) - 1);
 
-            // 检查 Curr[q] 投射回中点是否经过 p 附近（若采样源落在 F8 UI 面板内则直接跳过，防止把面板文字拉扯到车身上！）
+            // 检查 Curr[q] 投射回目标相位 Phase 是否经过 p 附近（跳过 F8 UI 镂空区）
             if (IsInExcludeUi(q)) continue;
             float2 vC = FwdMotion.Load(int3(q, 0));
-            float2 midFromC = float2(q) + ((FgMode == 0) ? (-vC * Phase) : (vC * Phase));
+            float2 midFromC = float2(q) + ((FgMode == 0) ? (-vC * Phase) : (vC * invPhase));
             if (length(midFromC - float2(p)) <= acceptDist) {
                 float costC = EvaluateFlowCandidate(uv, vC, stationaryAnchored);
                 if (costC < bestCost - 0.004) {
@@ -1080,7 +1103,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
                 }
             }
 
-            // 检查 Prev[q] 投射到中点是否经过 p 附近
+            // 检查 Prev[q] 投射到目标相位 Phase 是否经过 p 附近
             if (FgMode != 0) {
                 float2 vP = -BwdMotion.Load(int3(q, 0));
                 float2 midFromP = float2(q) - vP * Phase;
@@ -1099,7 +1122,12 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
 }
 )hlsl";
 
-// 6B. 零闪烁模型边缘遮挡自洽修补 + 全彩抗压缩噪点 UI 锁定 X2 合成着色器
+// 6B. 多模型 2X/3X 任意相位零闪烁边缘遮挡自洽修补 + 全彩抗压缩噪点 UI 锁定合成着色器
+// 内置四大专用补帧算法模型：
+//   - FgModel 0: 🎯 Optical-Balanced v3 (均衡全能双向遮挡自洽)
+//   - FgModel 1: 🏎️ Action-UltraWide Pro (5点抗振铃运动锐度补偿 + 高速甩镜头防退化，专为竞速/FPS 3X 90/180帧定制)
+//   - FgModel 2: 🛡️ Edge-Lock HaloFree (9点 3x3 邻域矢量中值 + 轮廓剪切度感知单侧表面锁定，根治挥刀/人物边缘果冻重影)
+//   - FgModel 3: ✨ Anime & HUD-Shield Max (双环 ±3/±5px 字幕小地图强护盾 + 赛璐珞深色描边防灰化保真)
 static const char* HLSL_FRAME_GEN_X2 = R"hlsl(
 Texture2D<float4> PrevFrame   : register(t0);
 Texture2D<float4> CurrFrame   : register(t1);
@@ -1114,10 +1142,12 @@ RWTexture2D<float4> OutGenFrame : register(u0);
 cbuffer FrameGenCB : register(b0) {
     uint2  Extent;
     float2 InvExtent;
-    uint   FgMode;            // 0 = 零等待外推预测 (N+0.5), 1 = 双向遮挡精插 (N-0.5)
+    uint   FgMode;            // 0 = 零等待外推预测 (N+Phase), 1 = 双向遮挡精插 (Prev->Curr Phase)
     float  SceneCutThreshold;
     float  UiProtection;
-    float  Phase;             // 0.5
+    float  Phase;             // 2X: 0.50; 3X: 0.333333 / 0.666667
+    uint   FgModel;           // 0..3 四大专用补帧模型
+    float3 Pad0;
 };
 
 float MaxDiff3(float3 a, float3 b) {
@@ -1126,7 +1156,7 @@ float MaxDiff3(float3 a, float3 b) {
 }
 
 float2 MedianOf5Flow(float2 c, float2 l, float2 r, float2 u, float2 d) {
-    // 分量级 5 点中值滤波，彻底剔除模型轮廓线单像素毛刺，同时保持锐利运动边界
+    // 分量级 5 点十字中值滤波，剔除单像素毛刺并保持锐利运动边界
     float xs[5] = { c.x, l.x, r.x, u.x, d.x };
     float ys[5] = { c.y, l.y, r.y, u.y, d.y };
     [unroll] for (int i = 0; i < 4; ++i) {
@@ -1138,9 +1168,53 @@ float2 MedianOf5Flow(float2 c, float2 l, float2 r, float2 u, float2 d) {
     return float2(xs[2], ys[2]);
 }
 
+float2 MedianOf9Flow(int2 p) {
+    // 模型 2 (轮廓零果冻) 专属：完整 3x3 九宫格邻域矢量中值滤波，彻底铲平斜向刀光与发丝边缘锯齿毛刺
+    float xs[9];
+    float ys[9];
+    int k = 0;
+    [unroll] for (int dy = -1; dy <= 1; ++dy) {
+        [unroll] for (int dx = -1; dx <= 1; ++dx) {
+            int2 q = clamp(p + int2(dx * 2, dy * 2), int2(0, 0), int2(Extent) - 1);
+            float2 v = ProjFlow.Load(int3(q, 0));
+            xs[k] = v.x;
+            ys[k] = v.y;
+            ++k;
+        }
+    }
+    [loop] for (int i = 1; i < 9; ++i) {
+        float kx = xs[i];
+        float ky = ys[i];
+        int jx = i - 1;
+        while (jx >= 0 && xs[jx] > kx) { xs[jx + 1] = xs[jx]; --jx; }
+        xs[jx + 1] = kx;
+        int jy = i - 1;
+        while (jy >= 0 && ys[jy] > ky) { ys[jy + 1] = ys[jy]; --jy; }
+        ys[jy + 1] = ky;
+    }
+    return float2(xs[4], ys[4]);
+}
+
+// 模型 1 (竞速射击大动态) 专属：抗振铃运动锐度保持采样（补偿 3X 1/3 与 2/3 亚像素双线性插值造成的高频路面纹理软化）
+float3 SampleCrispWarp(Texture2D<float4> tex, float2 uvSample, float crispGain) {
+    float3 c = tex.SampleLevel(LinearClamp, uvSample, 0).rgb;
+    if (crispGain <= 0.01) return c;
+    float2 ox = float2(InvExtent.x * 0.72, 0.0);
+    float2 oy = float2(0.0, InvExtent.y * 0.72);
+    float3 l = tex.SampleLevel(LinearClamp, clamp(uvSample - ox, 0.0, 1.0), 0).rgb;
+    float3 r = tex.SampleLevel(LinearClamp, clamp(uvSample + ox, 0.0, 1.0), 0).rgb;
+    float3 u = tex.SampleLevel(LinearClamp, clamp(uvSample - oy, 0.0, 1.0), 0).rgb;
+    float3 d = tex.SampleLevel(LinearClamp, clamp(uvSample + oy, 0.0, 1.0), 0).rgb;
+    float3 mn = min(c, min(min(l, r), min(u, d)));
+    float3 mx = max(c, max(max(l, r), max(u, d)));
+    float3 blur = 0.25 * (l + r + u + d);
+    return clamp(c + (c - blur) * crispGain, mn, mx);
+}
+
 // 全彩抗 H.264 量化蚊噪静态 UI / 血条 / 小地图 / 字幕 / 准星保护掩码 (0.0 ~ 1.0)
 float ComputeStationaryUiLock(int2 p, float flowMag) {
-    if (UiProtection <= 0.02) return 0.0;
+    float effUiProt = (FgModel == 3) ? saturate(max(UiProtection, 0.65) * 1.22) : UiProtection;
+    if (effUiProt <= 0.02) return 0.0;
 
     float3 c0 = CurrFrame.Load(int3(p, 0)).rgb;
     float3 p0 = PrevFrame.Load(int3(p, 0)).rgb;
@@ -1164,7 +1238,8 @@ float ComputeStationaryUiLock(int2 p, float flowMag) {
     meanZeroDiff *= (1.0 / 9.0);
 
     // 激烈转视角时 Xbox H.264 编码器 QP 升高，静止 UI 也会带 0.015~0.035 的块量化噪点，自适应放宽容差
-    float noiseTol = (0.018 + 0.026 * UiProtection) + saturate(flowMag / 45.0) * 0.012;
+    float modelTolBoost = (FgModel == 3) ? 1.25 : 1.0;
+    float noiseTol = ((0.018 + 0.026 * effUiProt) + saturate(flowMag / 45.0) * 0.012) * modelTolBoost;
 
     // 1. 当前 3x3 块本身在前后两帧完全静止（无论红血条、黑底框、白字幕、彩色图标全部覆盖！）
     float directLock = (1.0 - smoothstep(noiseTol * 0.65, noiseTol * 1.25, meanZeroDiff)) *
@@ -1175,10 +1250,15 @@ float ComputeStationaryUiLock(int2 p, float flowMag) {
         directLock *= 0.25;
     }
 
-    // 2. 保护 UI 字体/图标外围 3px 抗锯齿描边光晕（防止背景高速划过时啃噬字体边缘造成闪烁）
-    if (flowMag > 2.5 && UiProtection > 0.25) {
-        const int2 haloOffs[4] = { int2(3, 0), int2(-3, 0), int2(0, 3), int2(0, -3) };
-        [unroll] for (int k = 0; k < 4; ++k) {
+    // 2. 保护 UI 字体/图标外围抗锯齿描边光晕（模型 3 额外开启 ±5px 二阶远环字幕外框护盾！）
+    if (flowMag > 2.0 && effUiProt > 0.20) {
+        const int2 haloOffs[8] = {
+            int2(3, 0), int2(-3, 0), int2(0, 3), int2(0, -3),
+            int2(5, 0), int2(-5, 0), int2(0, 5), int2(0, -5)
+        };
+        int haloCount = (FgModel == 3) ? 8 : 4;
+        float contrastReq = (FgModel == 3) ? 0.10 : 0.14;
+        [loop] for (int k = 0; k < haloCount; ++k) {
             int2 hq = clamp(p + haloOffs[k], int2(0, 0), int2(Extent) - 1);
             float3 ch = CurrFrame.Load(int3(hq, 0)).rgb;
             float3 ph = PrevFrame.Load(int3(hq, 0)).rgb;
@@ -1186,8 +1266,8 @@ float ComputeStationaryUiLock(int2 p, float flowMag) {
             float3 ch2 = CurrFrame.Load(int3(hq2, 0)).rgb;
             float hd = MaxDiff3(ch, ph);
             float hContrast = MaxDiff3(ch, ch2);
-            if (hd < noiseTol * 0.75 && hContrast > 0.14 && MaxDiff3(c0, p0) < noiseTol * 1.6) {
-                haloUiAnchor = max(haloUiAnchor, 0.88 * UiProtection);
+            if (hd < noiseTol * 0.80 && hContrast > contrastReq && MaxDiff3(c0, p0) < noiseTol * 1.65) {
+                haloUiAnchor = max(haloUiAnchor, ((FgModel == 3) ? 0.94 : 0.88) * effUiProt);
             }
         }
     }
@@ -1204,13 +1284,14 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
     float3 colCurr = CurrFrame.Load(int3(p, 0)).rgb;
     float3 colPrev = PrevFrame.Load(int3(p, 0)).rgb;
 
-    // 5 点中值滤波去除模型轮廓边缘杂散矢量毛刺
+    // 读取邻域运动场并根据所选补帧模型执行 5点十字中值 或 9点九宫格中值滤波 + 剪切梯度检测
     float2 fwdC = ProjFlow.Load(int3(p, 0));
     float2 fwdL = ProjFlow.Load(int3(clamp(p + int2(-2, 0), int2(0,0), int2(Extent)-1), 0));
     float2 fwdR = ProjFlow.Load(int3(clamp(p + int2( 2, 0), int2(0,0), int2(Extent)-1), 0));
     float2 fwdU = ProjFlow.Load(int3(clamp(p + int2(0, -2), int2(0,0), int2(Extent)-1), 0));
     float2 fwdD = ProjFlow.Load(int3(clamp(p + int2(0,  2), int2(0,0), int2(Extent)-1), 0));
-    float2 fwd = MedianOf5Flow(fwdC, fwdL, fwdR, fwdU, fwdD);
+    float2 fwd = (FgModel == 2) ? MedianOf9Flow(p) : MedianOf5Flow(fwdC, fwdL, fwdR, fwdU, fwdD);
+    float flowShear = max(length(fwdR - fwdL), length(fwdD - fwdU));
 
     float flowMag = length(fwd);
     if (flowMag < 0.45 && MaxDiff3(colCurr, colPrev) < 0.015) {
@@ -1229,26 +1310,29 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
     float fallbackToCurr = 0.0;
 
     if (FgMode == 0) {
-        // ⚡ Mode 0: 零等待外推预测 X2 (t = N + 0.5, 真实帧 0ms 扣押)
+        // ⚡ Mode 0: 零等待外推预测 2X/3X (t = N + Phase, 真实帧 0ms 扣押)
         float2 sampleUv = clamp(uv + fwd * Phase * InvExtent, 0.0, 1.0);
         float2 fAtSrc = FwdMotion.SampleLevel(LinearClamp, sampleUv, 0);
         float confAtSrc = FlowConf.SampleLevel(LinearClamp, sampleUv, 0).x;
         float vecErr = length(fAtSrc - fwd);
         float validWeight = smoothstep(0.12, 0.45, confAtSrc) * (1.0 - smoothstep(6.0, 18.0, vecErr));
         float2 safeUv = clamp(uv + fwd * (Phase * validWeight) * InvExtent, 0.0, 1.0);
-        warped = CurrFrame.SampleLevel(LinearClamp, safeUv, 0).rgb;
-        fallbackToCurr = smoothstep(55.0, 100.0, flowMag) * (1.0 - validWeight);
+        float crisp = (FgModel == 1) ? (0.42 * saturate(flowMag / 10.0)) : 0.0;
+        warped = SampleCrispWarp(CurrFrame, safeUv, crisp);
+        float whipLim0 = (FgModel == 1) ? 80.0 : 55.0;
+        float whipLim1 = (FgModel == 1) ? 135.0 : 100.0;
+        fallbackToCurr = smoothstep(whipLim0, whipLim1, flowMag) * (1.0 - validWeight);
     } else {
-        // 🎯 Mode 1: 双向矢量自洽遮挡修补内插 X2 (t = N - 0.5)
-        float2 uvCurr = clamp(uv - fwd * Phase * InvExtent, 0.0, 1.0);
+        // 🎯 Mode 1: 双向矢量自洽遮挡修补任意相位内插 (2X: Phase=0.5; 3X: Phase=1/3 & 2/3)
+        float invPhase = 1.0 - Phase;
+        float2 uvCurr = clamp(uv - fwd * invPhase * InvExtent, 0.0, 1.0);
         float2 uvPrev = clamp(uv + fwd * Phase * InvExtent, 0.0, 1.0);
 
-        float3 sCurr = CurrFrame.SampleLevel(LinearClamp, uvCurr, 0).rgb;
-        float3 sPrev = PrevFrame.SampleLevel(LinearClamp, uvPrev, 0).rgb;
+        float crisp = (FgModel == 1) ? (0.45 * saturate((flowMag - 1.2) / 10.0)) : 0.0;
+        float3 sCurr = SampleCrispWarp(CurrFrame, uvCurr, crisp);
+        float3 sPrev = SampleCrispWarp(PrevFrame, uvPrev, crisp);
 
         // 读取各自真实坐标系下的光流矢量与可见置信度，精准判定单侧遮挡！
-        // 模型后缘新露出区：Curr[uvCurr] 光流自洽 (vecErrCurr≈0)，Prev[uvPrev] 仍是刚离开的模型 (vecErrPrev 很大) -> 平滑选 sCurr！
-        // 模型前缘被遮挡区：Prev[uvPrev] 光流自洽 (vecErrPrev≈0)，Curr[uvCurr] 已变成闯入的模型 (vecErrCurr 很大) -> 平滑选 sPrev！
         float2 fAtCurr = FwdMotion.SampleLevel(LinearClamp, uvCurr, 0);
         float2 vAtPrev = -BwdMotion.SampleLevel(LinearClamp, uvPrev, 0);
         float vecErrCurr = length(fAtCurr - fwd);
@@ -1260,17 +1344,35 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
         float scoreCurr = confCurr - 0.085 * vecErrCurr;
         float scorePrev = confPrev - 0.085 * vecErrPrev;
 
-        // 连续平滑权重（绝不使用 >= 二值跳变，彻底根除角色轮廓碎裂与 30Hz 闪烁！）
         float colorDiff = MaxDiff3(sCurr, sPrev);
-        float occSelect = smoothstep(-0.32, 0.32, scoreCurr - scorePrev);
-        float blend = lerp(0.5, occSelect, smoothstep(0.035, 0.11, colorDiff));
+        float occBand = 0.32;
+        float edgeSnap = 0.0;
+
+        if (FgModel == 2) {
+            // 模型 2 (轮廓零果冻)：在运动剪切边界处收窄混合带并强制偏向单侧未遮挡前景/背景表面，杜绝半透明双刀刃果冻重影！
+            float shearFactor = saturate((flowShear - 3.0) * 0.25);
+            occBand = lerp(0.30, 0.12, shearFactor);
+            edgeSnap = shearFactor * 0.85;
+        } else if (FgModel == 3) {
+            // 模型 3 (二次元与字幕强护盾)：保护深色赛璐珞描边墨线不在半帧混合中被冲淡发灰
+            float lumaMin = min(dot(sCurr, float3(0.299, 0.587, 0.114)), dot(sPrev, float3(0.299, 0.587, 0.114)));
+            if (colorDiff > 0.15 && lumaMin < 0.14) {
+                occBand = 0.18;
+                edgeSnap = 0.55;
+            }
+        }
+
+        float occSelect = smoothstep(-occBand, occBand, scoreCurr - scorePrev);
+        float blend = lerp(Phase, occSelect, saturate(smoothstep(0.035, 0.11, colorDiff) + edgeSnap));
         warped = lerp(sPrev, sCurr, blend);
 
-        // 激烈甩视角超高速防崩安全阀：若两端矢量同时失配且色差巨大（爆炸粒子/超 70px 甩镜头），平滑回退至真实帧杜绝破面闪烁
+        // 激烈甩视角超高速防崩安全阀（模型 1 竞速大动态放宽至 85..140px 保持超高速连贯插帧）
         float minVecErr = min(vecErrCurr, vecErrPrev);
         float maxConf = max(confCurr, confPrev);
-        float chaosUnreliable = smoothstep(7.0, 20.0, minVecErr) * smoothstep(0.10, 0.24, colorDiff);
-        float extremeWhip = smoothstep(60.0, 110.0, flowMag) * (1.0 - maxConf * 0.75);
+        float chaosUnreliable = smoothstep(7.5, 21.0, minVecErr) * smoothstep(0.10, 0.25, colorDiff);
+        float whipLo = (FgModel == 1) ? 85.0 : 60.0;
+        float whipHi = (FgModel == 1) ? 140.0 : 110.0;
+        float extremeWhip = smoothstep(whipLo, whipHi, flowMag) * (1.0 - maxConf * 0.75);
         fallbackToCurr = saturate(max(chaosUnreliable, extremeWhip));
     }
 

@@ -56,8 +56,18 @@ assert.equal(report.dedup30In60Verified, true, "30-in-60 重复帧智能去重�
 assert.equal(report.dupSkipped, 4, `期望滤除 4 个 H.264 噪点重复帧，实际: ${report.dupSkipped}`);
 assert.ok(
   report.midpointBallX >= 534.0 && report.midpointBallX <= 546.0,
-  `补帧中点几何坐标偏离理想值 540.0: ${report.midpointBallX}`
+  `2X 补帧中点几何坐标偏离理想值 540.0: ${report.midpointBallX}`
 );
+assert.equal(report.x3Verified, true, "3X 三倍补帧双相位几何自检未通过");
+assert.ok(
+  report.x3BallPhase1 >= 531.0 && report.x3BallPhase1 <= 541.0,
+  `3X 第 1/3 分位几何坐标偏离理想值 536.0: ${report.x3BallPhase1}`
+);
+assert.ok(
+  report.x3BallPhase2 >= 539.0 && report.x3BallPhase2 <= 549.0 && report.x3BallPhase2 > report.x3BallPhase1 + 4.0,
+  `3X 第 2/3 分位几何坐标偏离理想值 544.0: ${report.x3BallPhase2}`
+);
+assert.equal(report.fgModelsVerified, 4, `期望全部 4 套补帧模型验证通过，实际: ${report.fgModelsVerified}`);
 assert.ok(
   report.uiFlickerDiff !== undefined && report.uiFlickerDiff < 1.5,
   `彩色 UI 抗闪烁误差过高: ${report.uiFlickerDiff}`
@@ -99,8 +109,18 @@ assert.ok(
 assert.equal(amdReport.dedup30In60Verified, true, "AMD 30-in-60 重复帧智能去重未通过");
 assert.ok(
   amdReport.midpointBallX >= 534.0 && amdReport.midpointBallX <= 546.0,
-  `AMD 金字塔双向光流补帧中点几何坐标偏离理想值 540.0: ${amdReport.midpointBallX}`
+  `AMD 金字塔双向光流 2X 补帧中点几何坐标偏离理想值 540.0: ${amdReport.midpointBallX}`
 );
+assert.equal(amdReport.x3Verified, true, "AMD 3X 三倍补帧双相位几何自检未通过");
+assert.ok(
+  amdReport.x3BallPhase1 >= 531.0 && amdReport.x3BallPhase1 <= 541.0,
+  `AMD 3X 第 1/3 分位几何坐标偏离理想值 536.0: ${amdReport.x3BallPhase1}`
+);
+assert.ok(
+  amdReport.x3BallPhase2 >= 539.0 && amdReport.x3BallPhase2 <= 549.0 && amdReport.x3BallPhase2 > amdReport.x3BallPhase1 + 4.0,
+  `AMD 3X 第 2/3 分位几何坐标偏离理想值 544.0: ${amdReport.x3BallPhase2}`
+);
+assert.equal(amdReport.fgModelsVerified, 4, `AMD 期望全部 4 套补帧模型验证通过，实际: ${amdReport.fgModelsVerified}`);
 assert.ok(
   amdReport.uiFlickerDiff !== undefined && amdReport.uiFlickerDiff < 1.5,
   `AMD 彩色 UI 抗闪烁误差过高: ${amdReport.uiFlickerDiff}`
@@ -144,6 +164,8 @@ await new Promise((resolve, reject) => {
         JSON.stringify({
           enabled: true,
           fgEnabled: true,
+          fgMultiplier: 3,
+          fgModel: 2,
           dedup30In60: true,
           dedupSensitivity: 6,
           fgMode: 1,

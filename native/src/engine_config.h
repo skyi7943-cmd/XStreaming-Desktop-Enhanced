@@ -22,14 +22,22 @@ struct EnhanceConfig {
     int viewportWidth = 0;
     int viewportHeight = 0;
 
-    // ==================== 1. 超低延迟 X2 插帧与 30-in-60 智能去重配置 ====================
+    // ==================== 1. 超低延迟 2X/3X 多倍插帧、多模型切换与 30-in-60 智能去重配置 ====================
     bool fgEnabled = true;
+    // 补帧倍率：2 = 2X 二倍补帧 (30→60 / 60→120 FPS)，3 = 3X 三倍补帧 (30→90 / 60→180 FPS，高刷显示器专属)
+    int fgMultiplier = 2;
+    // 补帧算法模型：
+    // 0 = 🎯 均衡全能模型 (Optical-Balanced v3，默认推荐，适合绝大多数 3A 大作)
+    // 1 = 🏎️ 竞速射击大动态模型 (Action-UltraWide Pro，4层±92px广域汇聚 + 运动微纹理防糊锐度保持)
+    // 2 = 🛡️ 角色轮廓零果冻模型 (Edge-Lock HaloFree，9点3x3中值抗剪切 + 挥刀/发丝边缘单侧防重影锁定)
+    // 3 = ✨ 字幕UI强护盾与二次元模型 (Anime & HUD-Shield Max，双环±5px文字描边防抖 + 赛璐珞黑线保真)
+    int fgModel = 0;
     // 智能识别并剔除 Xbox 60fps 串流容器中的 30fps 编码重复帧（解决“串流60帧但游戏30帧导致不插帧”的核心开关，默认必开！）
     bool dedup30In60 = true;
     // 重复帧抗噪灵敏度 (1 ~ 10，默认 5：精准过滤 H.264 压缩噪点同时保留微幅视角移动)
     int dedupSensitivity = 5;
-    // 0 = 零等待预测 X2 (Zero-Wait Extrapolation，0ms 真实帧扣押)
-    // 1 = 双向光流遮挡修补精插 X2 (Bidirectional Midpoint，默认推荐：专治 30帧转视角卡顿，严格 50% 几何中点丝滑 60帧)
+    // 0 = 零等待预测 2X/3X (Zero-Wait Extrapolation，0ms 真实帧扣押)
+    // 1 = 双向光流遮挡修补精插 2X/3X (Bidirectional Interpolation，默认推荐：严格几何相位内插)
     int fgMode = 1;
     float fgSceneCutThreshold = 0.18f; // 切镜防果冻阈值 (0.05 ~ 0.40)
     float fgUiProtection = 0.75f;      // 全彩静态 UI / 小地图 / 血条 / 准星 / 字幕防闪烁锁定强度 (0.0 ~ 1.0)

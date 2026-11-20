@@ -73,6 +73,8 @@ namespace MiniJson {
         if (ExtractNumber(line, "viewportHeight", d)) cfg.viewportHeight = (int)std::lround(d);
 
         if (ExtractBool(line, "fgEnabled", b)) cfg.fgEnabled = b;
+        if (ExtractNumber(line, "fgMultiplier", d)) cfg.fgMultiplier = std::clamp((int)std::lround(d), 2, 3);
+        if (ExtractNumber(line, "fgModel", d)) cfg.fgModel = std::clamp((int)std::lround(d), 0, 3);
         if (ExtractBool(line, "dedup30In60", b)) cfg.dedup30In60 = b;
         if (ExtractNumber(line, "dedupSensitivity", d)) cfg.dedupSensitivity = std::clamp((int)std::lround(d), 1, 10);
         if (ExtractNumber(line, "fgMode", d)) cfg.fgMode = std::clamp((int)std::lround(d), 0, 1);
@@ -248,7 +250,7 @@ public:
         cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         cbd.ByteWidth = 48;
         _dev11->CreateBuffer(&cbd, nullptr, _cbCompose.Put());
-        cbd.ByteWidth = 32;
+        cbd.ByteWidth = 48;
         _dev11->CreateBuffer(&cbd, nullptr, _cbFrameGen.Put());
         cbd.ByteWidth = 128;
         _dev11->CreateBuffer(&cbd, nullptr, _cbProj.Put());
@@ -536,8 +538,8 @@ public:
         _avgComposeMs = (_avgComposeMs <= 0.001) ? compMs : (_avgComposeMs * 0.85 + compMs * 0.15);
     }
 
-    // 合成 X2 补帧画面（先执行零竞态光度自洽中点运动场汇聚，再执行矢量自洽遮挡修补与全彩 UI 锁定合成）
-    bool SynthesizeX2Frame(const EnhanceConfig& cfg) {
+    // 合成任意相位补帧画面（支持 2X: phase=0.5 与 3X: phase=1/3 & 2/3，以及四大专用补帧算法模型 FgModel 0..3）
+    bool SynthesizeFrame(const EnhanceConfig& cfg, float phase = 0.5f) {
         if (!_hasPrevEnhanced) {
             _hasPrevEnhanced = true;
             return false;
@@ -547,22 +549,25 @@ public:
         QueryPerformanceCounter(&t0);
 
         uint32_t fgMode = (uint32_t)std::clamp(cfg.fgMode, 0, 1);
+        uint32_t fgModel = (uint32_t)std::clamp(cfg.fgModel, 0, 3);
+        float clampedPhase = std::clamp(phase, 0.10f, 0.90f);
 
-        // Step A: 零竞态光度自洽中点运动场汇聚 (含 GPU 原生 UI 抽屉边界隔离，严禁 F8 面板像素被拉扯到公路与车身上！)
+        // Step A: 零竞态光度自洽任意相位运动场汇聚 (含 GPU 原生 UI 抽屉边界隔离，严禁 F8 面板像素被拉扯到公路与车身上！)
         struct alignas(16) ProjCB {
             uint32_t w, h;
             float invW, invH;
             uint32_t fgMode;
             float phase;
             uint32_t excludeCount;
-            uint32_t pad0;
+            uint32_t fgModel;
             uint32_t excludeRects[6][4];
         } pcb{};
         pcb.w = _width; pcb.h = _height;
         pcb.invW = 1.0f / float(_width); pcb.invH = 1.0f / float(_height);
         pcb.fgMode = fgMode;
-        pcb.phase = 0.5f;
+        pcb.phase = clampedPhase;
         pcb.excludeCount = (uint32_t)std::min<size_t>(6, cfg.excludeRects.size());
+        pcb.fgModel = fgModel;
         for (uint32_t i = 0; i < pcb.excludeCount; ++i) {
             const auto& er = cfg.excludeRects[i];
             pcb.excludeRects[i][0] = (uint32_t)std::clamp(er.x, 0, (int)_width);
@@ -595,7 +600,7 @@ public:
         _ctx11->CSSetShaderResources(0, 5, nullProjSrvs);
         _ctx11->CSSetUnorderedAccessViews(0, 1, nullProjUavs, nullptr);
 
-        // Step B: 执行矢量自洽遮挡修补 + 全彩抗噪 UI 保护 X2 合成
+        // Step B: 执行多模型矢量自洽遮挡修补 + 全彩抗噪 UI 保护合成
         struct alignas(16) FgCB {
             uint32_t w, h;
             float invW, invH;
@@ -603,13 +608,17 @@ public:
             float sceneCut;
             float uiProt;
             float phase;
+            uint32_t fgModel;
+            float pad0[3];
         } fcb{
             _width, _height,
             1.0f / float(_width), 1.0f / float(_height),
             fgMode,
             cfg.fgSceneCutThreshold,
             cfg.fgUiProtection,
-            0.5f
+            clampedPhase,
+            fgModel,
+            { 0.0f, 0.0f, 0.0f }
         };
         _ctx11->UpdateSubresource(_cbFrameGen.Get(), 0, nullptr, &fcb, 0, 0);
 
@@ -904,11 +913,11 @@ static int RunHardwareSelfTest(const std::wstring& binDir, bool forceAmdMode = f
             cfg.dlss5LatencyMode = 0; // 后半程验证双层异步模式
         }
         pipe.ProcessNewRealFrame(cfg);
-        pipe.SynthesizeX2Frame(cfg);
+        pipe.SynthesizeFrame(cfg, 0.5f);
         pipe.MarkRealFrameCommitted();
     }
 
-    // 回读校验增强帧 (gameIdx=3, 真球心 x=552) 与 X2 内插补帧 (gameIdx=2->3 中点, 理想球心 x=540.0)
+    // 回读校验增强帧 (gameIdx=3, 真球心 x=552) 与 2X 内插补帧 (gameIdx=2->3 中点, 理想球心 x=540.0)
     pipe.Context11()->CopyResource(stageReadEnh.Get(), pipe.CurrentEnhancedTex());
     pipe.Context11()->CopyResource(stageReadGen.Get(), pipe.GeneratedTex());
     pipe.Context11()->Flush();
@@ -998,6 +1007,58 @@ static int RunHardwareSelfTest(const std::wstring& binDir, bool forceAmdMode = f
         pipe.Context11()->Unmap(stageReadEnh.Get(), 0);
     }
 
+    // 实测验证 3X 三倍补帧双相位几何精度 (gameIdx=2 [x=528] -> gameIdx=3 [x=552]: Phase 1/3 理想球心 x=536.0, Phase 2/3 理想球心 x=544.0)
+    // 同时遍历验证全部 4 套补帧算法模型 (FgModel 0..3) 的几何精度与彩色 UI 抗闪烁能力！
+    auto measureGenPhaseAndModel = [&](int modelId, float testPhase, double& outUiErr) -> double {
+        EnhanceConfig testCfg = cfg;
+        testCfg.fgModel = modelId;
+        testCfg.fgMultiplier = 3;
+        pipe.SynthesizeFrame(testCfg, testPhase);
+        pipe.Context11()->CopyResource(stageReadGen.Get(), pipe.GeneratedTex());
+        pipe.Context11()->Flush();
+
+        double sx = 0.0, cnt = 0.0, uErr = 0.0, uCnt = 0.0;
+        D3D11_MAPPED_SUBRESOURCE mEnh{}, mGen{};
+        if (SUCCEEDED(pipe.Context11()->Map(stageReadEnh.Get(), 0, D3D11_MAP_READ, 0, &mEnh)) &&
+            SUCCEEDED(pipe.Context11()->Map(stageReadGen.Get(), 0, D3D11_MAP_READ, 0, &mGen))) {
+            for (uint32_t y = 82; y <= 94; ++y) {
+                const uint8_t* pe = (const uint8_t*)mEnh.pData + y * mEnh.RowPitch;
+                const uint8_t* pg = (const uint8_t*)mGen.pData + y * mGen.RowPitch;
+                for (uint32_t x = 124; x <= 276; ++x) {
+                    uErr += std::abs(int(pe[x * 4]) - int(pg[x * 4])) +
+                            std::abs(int(pe[x * 4 + 1]) - int(pg[x * 4 + 1])) +
+                            std::abs(int(pe[x * 4 + 2]) - int(pg[x * 4 + 2]));
+                    uCnt += 3.0;
+                }
+            }
+            for (uint32_t y = 370; y <= 470; y += 2) {
+                const uint8_t* pg = (const uint8_t*)mGen.pData + y * mGen.RowPitch;
+                for (uint32_t x = 440; x <= 620; x += 2) {
+                    if (pg[x * 4] > 145 && int(pg[x * 4]) - int(pg[x * 4 + 2]) > 65) {
+                        sx += double(x);
+                        cnt += 1.0;
+                    }
+                }
+            }
+            pipe.Context11()->Unmap(stageReadGen.Get(), 0);
+            pipe.Context11()->Unmap(stageReadEnh.Get(), 0);
+        }
+        outUiErr = uErr / std::max(1.0, uCnt);
+        return (cnt > 0.0) ? (sx / cnt) : 0.0;
+    };
+
+    double uiErrP1 = 0.0, uiErrP2 = 0.0;
+    double x3BallPhase1 = measureGenPhaseAndModel(1, 1.0f / 3.0f, uiErrP1);
+    double x3BallPhase2 = measureGenPhaseAndModel(1, 2.0f / 3.0f, uiErrP2);
+    uint32_t fgModelsVerified = 0;
+    for (int m = 0; m < 4; ++m) {
+        double mUiErr = 0.0;
+        double mMidX = measureGenPhaseAndModel(m, 0.5f, mUiErr);
+        if (mMidX >= 534.0 && mMidX <= 546.0 && mUiErr < 1.5) {
+            ++fgModelsVerified;
+        }
+    }
+
     // 额外实测验证：切换「自然均衡 (Style=0)」与「电影光影 (Style=2)」是否真实触发 NGX 风格重塑并无损输出！
     ComRef<ID3D11Texture2D> stageStyle0, stageStyle2;
     stdDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -1065,19 +1126,25 @@ static int RunHardwareSelfTest(const std::wstring& binDir, bool forceAmdMode = f
     double midpointBallX = (cntGenBall > 0.0) ? (sumGenX / cntGenBall) : 0.0;
     bool dedupOk = (realAccepted == 4 && dupSkipped == 4);
     bool midpointOk = (midpointBallX >= 534.0 && midpointBallX <= 546.0);
+    bool x3Ok = (x3BallPhase1 >= 531.0 && x3BallPhase1 <= 541.0) &&
+                (x3BallPhase2 >= 539.0 && x3BallPhase2 <= 549.0) &&
+                (x3BallPhase2 - x3BallPhase1 >= 4.0) &&
+                (uiErrP1 < 1.5 && uiErrP2 < 1.5);
+    bool allModelsOk = (fgModelsVerified == 4);
     bool uiStableOk = (uiFlickerDiff < 1.5);
     bool nightCleanOk = (nightMaxAnomaly <= 8.0);
     bool skyCleanOk = (skyMaxSpot <= 8.0);
     bool asyncNoGhostOk = (asyncTrailGhost <= 12.0);
     bool styleWorksOk = (styleDiff0vs2 > 0.05);
     bool amdBackendOk = !forceAmdMode || (std::strcmp(pipe.NrBackendName(), "RadeonNR") == 0 && !pipe.NvofaActive());
-    bool ok = (avgLumaEnh > 10.0) && (diffEnhVsGen > 0.05) && pipe.Dlss5Ready() && amdBackendOk && dedupOk && midpointOk && uiStableOk && nightCleanOk && skyCleanOk && asyncNoGhostOk && styleWorksOk;
+    bool ok = (avgLumaEnh > 10.0) && (diffEnhVsGen > 0.05) && pipe.Dlss5Ready() && amdBackendOk && dedupOk && midpointOk && x3Ok && allModelsOk && uiStableOk && nightCleanOk && skyCleanOk && asyncNoGhostOk && styleWorksOk;
     std::printf(
         "{\"selfTest\":%s,\"vendor\":\"%s\",\"nrBackend\":\"%s\",\"flowBackend\":\"%s\","
         "\"gpu\":\"%s\",\"dlss5Ready\":%s,\"dualDlss5Verified\":true,\"styleDiff0vs2\":%.3f,\"nvofaHardware\":%s,"
         "\"wgcRecordable\":%s,\"nightMaxAnomaly\":%.1f,\"skyMaxSpot\":%.1f,\"asyncTrailGhost\":%.1f,"
         "\"dedup30In60Verified\":%s,\"realAccepted\":%u,\"dupSkipped\":%u,"
-        "\"realBallX\":%.2f,\"midpointBallX\":%.2f,\"uiFlickerDiff\":%.3f,"
+        "\"realBallX\":%.2f,\"midpointBallX\":%.2f,\"x3Verified\":%s,\"x3BallPhase1\":%.2f,\"x3BallPhase2\":%.2f,"
+        "\"fgModelsVerified\":%u,\"uiFlickerDiff\":%.3f,"
         "\"workset\":\"%ux%u\",\"dlss5GpuMs\":%.2f,\"dlss5HostMs\":%.2f,\"flowMs\":%.2f,\"composeSharpenMs\":%.2f,"
         "\"fgX2Ms\":%.2f,\"avgLuma\":%.2f,\"x2MotionDelta\":%.3f}\n",
         ok ? "true" : "false",
@@ -1092,7 +1159,9 @@ static int RunHardwareSelfTest(const std::wstring& binDir, bool forceAmdMode = f
         nightMaxAnomaly, skyMaxSpot, asyncTrailGhost,
         dedupOk ? "true" : "false",
         realAccepted, dupSkipped,
-        realBallX, midpointBallX, uiFlickerDiff,
+        realBallX, midpointBallX,
+        x3Ok ? "true" : "false", x3BallPhase1, x3BallPhase2,
+        fgModelsVerified, uiFlickerDiff,
         pipe.Dlss5WorkW(), pipe.Dlss5WorkH(),
         pipe.Dlss5GpuMs(), pipe.Dlss5HostMs(), pipe.FlowMs(), pipe.ComposeMs(), pipe.FgMs(),
         avgLumaEnh, diffEnhVsGen
@@ -1375,10 +1444,17 @@ int main(int argc, char** argv) {
     double lastValidNonBlackTime = engineStartTime;
     double lastRealArrival = nowSec();
     double avgRealInterval = 1.0 / 30.0; // 默认按 30fps 主机游戏步调初始化，若为真 60fps 会在 3 帧内自适应收敛至 16.67ms
-    bool pendingSecondFrame = false;
-    bool pendingIsGenerated = true;
-    double lastFirstPresentTime = 0.0;
-    double scheduledSecondTime = 0.0;
+
+    // 多倍补帧微秒级均匀排期队列：同时支持 2X (1 槽: 1/2 + 真实帧) 与 3X (2 槽: 1/3 + 2/3 + 真实帧)！
+    struct ScheduledFrameSlot {
+        bool isGenerated = false;
+        float phase = 0.5f;
+        double targetTime = 0.0;
+    };
+    ScheduledFrameSlot pendingSlots[2]{};
+    int pendingSlotCount = 0;
+    int pendingSlotIndex = 0;
+    double lastPresentedFrameTime = 0.0;
     bool needStaticDlssHarvest = false;
     bool hasAnyCapturedFrame = false;
     bool latencyProbePending = false;
@@ -1432,7 +1508,8 @@ int main(int argc, char** argv) {
             if (overlayVisible) {
                 ShowWindow(overlayHwnd, SW_HIDE);
                 overlayVisible = false;
-                pendingSecondFrame = false;
+                pendingSlotCount = 0;
+                pendingSlotIndex = 0;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(12));
             continue;
@@ -1484,7 +1561,8 @@ int main(int argc, char** argv) {
                         autoForceWgc = true;
                     }
                 }
-                pendingSecondFrame = false;
+                pendingSlotCount = 0;
+                pendingSlotIndex = 0;
             }
             lastAppliedVp = newVp;
             rgnDirty.store(true);
@@ -1529,34 +1607,41 @@ int main(int argc, char** argv) {
             }
         };
 
-        // 检查是否到达排期的第 2 帧上屏时刻（X2 补帧半周期微秒级精准均匀输出）
+        // 检查是否到达排期的后续上屏槽位（同时支持 2X 半周期 1 槽 与 3X 三分周期 2 槽微秒级精准均匀输出！）
         double tNow = nowSec();
-        if (pendingSecondFrame) {
-            double remainSec = scheduledSecondTime - tNow;
+        if (pendingSlotIndex < pendingSlotCount) {
+            const ScheduledFrameSlot& slot = pendingSlots[pendingSlotIndex];
+            double remainSec = slot.targetTime - tNow;
             if (remainSec <= 0.0012) {
-                while ((tNow = nowSec()) < scheduledSecondTime) {
+                while ((tNow = nowSec()) < slot.targetTime) {
                     YieldProcessor();
                 }
-                if (pendingIsGenerated) {
-                    if (pipe.SynthesizeX2Frame(cfg)) {
+                if (slot.isGenerated) {
+                    if (pipe.SynthesizeFrame(cfg, slot.phase)) {
                         presentNow(true);
+                        lastPresentedFrameTime = nowSec();
                     }
-                    pipe.MarkRealFrameCommitted();
                 } else {
                     presentNow(false);
+                    lastPresentedFrameTime = nowSec();
+                }
+                ++pendingSlotIndex;
+                if (pendingSlotIndex >= pendingSlotCount) {
+                    pendingSlotCount = 0;
+                    pendingSlotIndex = 0;
                     pipe.MarkRealFrameCommitted();
                 }
-                pendingSecondFrame = false;
             }
         }
 
         // 静态暂停画面收尾增强与实时调参即时响应（不影响运动光流历史）
         tNow = nowSec();
-        if (hasAnyCapturedFrame && !pendingSecondFrame && (tNow - lastRealArrival > 0.090)) {
+        if (hasAnyCapturedFrame && (pendingSlotIndex >= pendingSlotCount) && (tNow - lastRealArrival > 0.090)) {
             if (needStaticDlssHarvest || cfgDirty.exchange(false)) {
                 needStaticDlssHarvest = false;
                 pipe.ProcessNewRealFrame(cfg);
                 presentNow(false);
+                lastPresentedFrameTime = nowSec();
                 pipe.MarkRealFrameCommitted();
             }
         } else if (tNow - lastRealArrival <= 0.090) {
@@ -1575,7 +1660,9 @@ int main(int argc, char** argv) {
 
         if (useWgc) {
             copiedOk = wgcCapturer.TryAcquireAndCopyViewport(pipe.Context11(), newVp, curW, curH, pipe.CandidateTex());
-            if (!copiedOk && (!pendingSecondFrame || (scheduledSecondTime - nowSec() > 0.0025))) {
+            bool hasPending = (pendingSlotIndex < pendingSlotCount);
+            double nextSlotTarget = hasPending ? pendingSlots[pendingSlotIndex].targetTime : 0.0;
+            if (!copiedOk && (!hasPending || (nextSlotTarget - nowSec() > 0.0025))) {
                 Sleep(1);
             }
         } else {
@@ -1670,26 +1757,39 @@ int main(int argc, char** argv) {
                 if (overlayVisible && (nowSec() - lastValidNonBlackTime > 0.80)) {
                     ShowWindow(overlayHwnd, SW_HIDE);
                     overlayVisible = false;
-                    pendingSecondFrame = false;
+                    pendingSlotCount = 0;
+                    pendingSlotIndex = 0;
                 }
             } else if (isDup) {
                 lastValidNonBlackTime = nowSec();
-                // 命中 Xbox 60fps 串流容器中的 30fps 编码重复帧！直接过滤，保护光流真实 30fps 位移与半周期补帧节奏
+                // 命中 Xbox 60fps 串流容器中的 30fps 编码重复帧！直接过滤，保护光流真实 30fps 位移与 2X/3X 均匀补帧节奏
                 ++dupSkippedCount;
             } else {
                 lastValidNonBlackTime = nowSec();
                 hasAnyCapturedFrame = true;
 
-                // 若上一帧的半周期真实帧还没上屏但新真实帧已赶到：确保第 1 帧在屏幕上至少完整驻留过 8.5ms (防 FLIP_DISCARD 瞬时覆盖吞帧！) 后再补齐第 2 帧
-                if (pendingSecondFrame && !pendingIsGenerated) {
-                    double minDisplayTime = lastFirstPresentTime + 0.0085;
-                    while (nowSec() < minDisplayTime) {
-                        YieldProcessor();
+                // 若上一周期尚有待上屏真实帧且新真实帧提前到达：保障已上屏帧最短驻留时长（3X: 4.5ms / 2X: 8.5ms 防 FLIP_DISCARD 吞帧）后立即刷出真实帧
+                if (pendingSlotIndex < pendingSlotCount) {
+                    bool hasUnpresentedReal = false;
+                    for (int si = pendingSlotIndex; si < pendingSlotCount; ++si) {
+                        if (!pendingSlots[si].isGenerated) {
+                            hasUnpresentedReal = true;
+                            break;
+                        }
                     }
-                    presentNow(false);
+                    if (hasUnpresentedReal) {
+                        double minResidency = (cfg.fgMultiplier >= 3) ? 0.0045 : 0.0085;
+                        double minDisplayTime = lastPresentedFrameTime + minResidency;
+                        while (nowSec() < minDisplayTime) {
+                            YieldProcessor();
+                        }
+                        presentNow(false);
+                        lastPresentedFrameTime = nowSec();
+                    }
                     pipe.MarkRealFrameCommitted();
+                    pendingSlotCount = 0;
+                    pendingSlotIndex = 0;
                 }
-                pendingSecondFrame = false;
 
                 double arrival = nowSec();
                 double dt = arrival - lastRealArrival;
@@ -1704,39 +1804,75 @@ int main(int argc, char** argv) {
                     pipe.ResetTemporalOnCut();
                     pipe.ProcessNewRealFrame(cfg);
                     presentNow(false);
+                    lastPresentedFrameTime = nowSec();
                     pipe.MarkRealFrameCommitted();
                 } else {
-                    // 执行真 30/60fps 光流 + DLSS 5 (单层或双层叠加，默认逐帧同步零残影) + CAS/RCAS 锐化
+                    // 执行真 30/60fps 光流 + DLSS 5 / RadeonNR + CAS/RCAS 锐化
                     pipe.ProcessNewRealFrame(cfg);
 
                     if (cfg.fgEnabled) {
-                        double halfStep = std::clamp(avgRealInterval * 0.49, 0.006, 0.028);
-                        if (cfg.fgMode == 0) {
-                            presentNow(false);
-                            lastFirstPresentTime = nowSec();
-                            pendingSecondFrame = true;
-                            pendingIsGenerated = true;
-                            // 关键修复：必须以第 1 帧实际上屏完成的时刻为锚点排期半周期（修复逐帧同步 DLSS 5 耗时 6~10ms 导致第 2 帧瞬时覆盖吞掉补帧的 Bug！）
-                            scheduledSecondTime = lastFirstPresentTime + halfStep;
-                        } else {
-                            if (pipe.SynthesizeX2Frame(cfg)) {
-                                presentNow(true);
-                                lastFirstPresentTime = nowSec();
-                                pendingSecondFrame = true;
-                                pendingIsGenerated = false;
-                                scheduledSecondTime = lastFirstPresentTime + halfStep;
-                            } else {
+                        int mult = std::clamp(cfg.fgMultiplier, 2, 3);
+                        if (mult == 3) {
+                            // 🔥 3X 三倍补帧排期 (30→90 FPS / 40→120 FPS / 60→180 FPS)：三分周期微秒级精准均匀上屏！
+                            double thirdStep = std::clamp(avgRealInterval * 0.326, 0.0034, 0.019);
+                            if (cfg.fgMode == 0) {
+                                // 零等待外推 3X：0ms 立即呈上真实帧，随后在 +1/3 与 +2/3 时刻外推两帧
                                 presentNow(false);
-                                pipe.MarkRealFrameCommitted();
+                                double tBase = nowSec();
+                                lastPresentedFrameTime = tBase;
+                                pendingSlots[0] = { true, 1.0f / 3.0f, tBase + thirdStep };
+                                pendingSlots[1] = { true, 2.0f / 3.0f, tBase + thirdStep * 2.0 };
+                                pendingSlotCount = 2;
+                                pendingSlotIndex = 0;
+                            } else {
+                                // 双向遮挡精插 3X：立即呈上 1/3 分位帧，随后在 +1/3 呈上 2/3 分位帧、+2/3 呈上真实帧
+                                if (pipe.SynthesizeFrame(cfg, 1.0f / 3.0f)) {
+                                    presentNow(true);
+                                    double tBase = nowSec();
+                                    lastPresentedFrameTime = tBase;
+                                    pendingSlots[0] = { true,  2.0f / 3.0f, tBase + thirdStep };
+                                    pendingSlots[1] = { false, 1.0f,        tBase + thirdStep * 2.0 };
+                                    pendingSlotCount = 2;
+                                    pendingSlotIndex = 0;
+                                } else {
+                                    presentNow(false);
+                                    lastPresentedFrameTime = nowSec();
+                                    pipe.MarkRealFrameCommitted();
+                                }
+                            }
+                        } else {
+                            // 🚀 2X 二倍补帧排期 (30→60 FPS / 60→120 FPS)：半周期微秒级精准均匀上屏
+                            double halfStep = std::clamp(avgRealInterval * 0.49, 0.005, 0.028);
+                            if (cfg.fgMode == 0) {
+                                presentNow(false);
+                                double tBase = nowSec();
+                                lastPresentedFrameTime = tBase;
+                                pendingSlots[0] = { true, 0.5f, tBase + halfStep };
+                                pendingSlotCount = 1;
+                                pendingSlotIndex = 0;
+                            } else {
+                                if (pipe.SynthesizeFrame(cfg, 0.5f)) {
+                                    presentNow(true);
+                                    double tBase = nowSec();
+                                    lastPresentedFrameTime = tBase;
+                                    pendingSlots[0] = { false, 1.0f, tBase + halfStep };
+                                    pendingSlotCount = 1;
+                                    pendingSlotIndex = 0;
+                                } else {
+                                    presentNow(false);
+                                    lastPresentedFrameTime = nowSec();
+                                    pipe.MarkRealFrameCommitted();
+                                }
                             }
                         }
                     } else {
                         presentNow(false);
+                        lastPresentedFrameTime = nowSec();
                         pipe.MarkRealFrameCommitted();
                     }
                 }
 
-                // 非阻塞异步轮询端到端 GPU 渲染延迟（0ms 主循环阻塞，绝不干扰 X2 补帧半周期节拍！）
+                // 非阻塞异步轮询端到端 GPU 渲染延迟（0ms 主循环阻塞，绝不干扰 2X/3X 补帧节拍！）
                 double tAfterPresent = nowSec();
                 if (!latencyProbePending && (tAfterPresent - lastLatencyProbeTime >= 0.25) && pipe.GpuDoneQuery()) {
                     lastLatencyProbeTime = tAfterPresent;
@@ -1760,7 +1896,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        // 每秒向 Electron 推送实时硬件遥测指标（含包含 DLSS 5 与插帧帧序扣押在内的 100% 真实增加延迟）
+        // 每秒向 Electron 推送实时硬件遥测指标（含 2X/3X 倍率、补帧模型及 100% 真实增加延迟）
         double tCheck = nowSec();
         double elapsed = tCheck - lastTelemetryTime;
         if (elapsed >= 1.0) {
@@ -1770,10 +1906,15 @@ int main(int argc, char** argv) {
             bool dlssOn = cfg.enabled && cfg.dlss5Enabled && pipe.Dlss5Ready();
             double dlssGpuMs = dlssOn ? pipe.Dlss5GpuMs() : 0.0;
             double dlssHostMs = dlssOn ? pipe.Dlss5HostMs() : 0.0;
-            // 双向中点内插 (Mode 1) 为计算 50% 几何中点需将真实帧延后约半个真实帧周期上屏；零等待外推 (Mode 0) 扣押为 0ms
-            double fgHoldMs = (cfg.enabled && cfg.fgEnabled && cfg.fgMode == 1)
-                                  ? (std::clamp(avgRealInterval * 0.49, 0.004, 0.028) * 1000.0)
-                                  : 0.0;
+            int activeMult = std::clamp(cfg.fgMultiplier, 2, 3);
+            int activeModel = std::clamp(cfg.fgModel, 0, 3);
+            // 双向内插 (Mode 1) 帧序缓冲：2X 延后约 1/2 周期，3X 延后约 2/3 周期；零等待外推 (Mode 0) 扣押为 0ms
+            double fgHoldMs = 0.0;
+            if (cfg.enabled && cfg.fgEnabled && cfg.fgMode == 1) {
+                fgHoldMs = (activeMult == 3)
+                               ? (std::clamp(avgRealInterval * 0.652, 0.0068, 0.038) * 1000.0)
+                               : (std::clamp(avgRealInterval * 0.49, 0.004, 0.028) * 1000.0);
+            }
             double gpuPipeMs = cfg.enabled ? avgGpuPipeMs : 0.0;
             double totalAddedMs = gpuPipeMs + fgHoldMs;
 
@@ -1783,7 +1924,7 @@ int main(int argc, char** argv) {
                 "\"dedup30In60\":%s,\"dlss5Active\":%s,\"dlss5Passes\":%d,\"dlss5Sync\":%s,\"dlss5WorkRes\":\"%ux%u\","
                 "\"dlss5Ms\":%.2f,\"dlss5HostMs\":%.2f,\"gpuPipeMs\":%.2f,\"fgHoldMs\":%.2f,\"totalAddedMs\":%.2f,"
                 "\"recordable\":%s,\"nvofa\":%s,\"flowMs\":%.2f,\"composeMs\":%.2f,\"fgMs\":%.2f,"
-                "\"fgActive\":%s,\"fgMode\":%d,\"sharpenMode\":%d,\"gpu\":\"%s\"}\n",
+                "\"fgActive\":%s,\"fgMode\":%d,\"fgMultiplier\":%d,\"fgModel\":%d,\"sharpenMode\":%d,\"gpu\":\"%s\"}\n",
                 pipe.VendorName(), pipe.NrBackendName(), pipe.FlowBackendName(),
                 rawFps, srcFps, dupSkippedCount, outFps,
                 cfg.dedup30In60 ? "true" : "false",
@@ -1796,7 +1937,7 @@ int main(int argc, char** argv) {
                 pipe.NvofaActive() ? "true" : "false",
                 pipe.FlowMs(), pipe.ComposeMs(), pipe.FgMs(),
                 cfg.fgEnabled ? "true" : "false",
-                cfg.fgMode, cfg.sharpenMode,
+                cfg.fgMode, activeMult, activeModel, cfg.sharpenMode,
                 pipe.GpuName().c_str()
             );
             rawCaptureCount = 0;

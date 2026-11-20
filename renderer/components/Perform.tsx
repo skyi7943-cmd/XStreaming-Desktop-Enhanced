@@ -38,13 +38,14 @@ function Perform({ xPlayer, connectState, enhanceTelemetry, isRecording }: any) 
 
   const enhActive = !!enhanceTelemetry?.running;
   const dupCount = enhanceTelemetry?.dupSkipped || 0;
+  const fgMult = Number(enhanceTelemetry?.fgMultiplier ?? 2) === 3 ? 3 : 2;
   const srcFpsLabel =
     enhActive && dupCount >= 5 && enhanceTelemetry?.srcFps
       ? `真${enhanceTelemetry.srcFps.toFixed(0)}(容器${performance.fps || 60})`
       : `${performance.fps || "--"}`;
   const outFpsText =
     enhActive && enhanceTelemetry?.outFps
-      ? `${enhanceTelemetry.outFps.toFixed(0)} FPS${enhanceTelemetry.fgActive ? " (真X2)" : ""}`
+      ? `${enhanceTelemetry.outFps.toFixed(0)} FPS${enhanceTelemetry.fgActive ? ` (真X${fgMult})` : ""}`
       : null;
 
   // 100% 硬件实测真实增加延迟拆解（含单层/双层 DLSS 5 推理/竞争耗时 + GPU 管线上屏耗时 + 插帧半周期扣押耗时）
@@ -147,7 +148,7 @@ function Perform({ xPlayer, connectState, enhanceTelemetry, isRecording }: any) 
                 ├ {dlssTag} 神经推理: {dlssDetailText}
               </div>
               <div className="px-1 text-xs text-sky-300">
-                └ X2 补帧帧序缓冲: {fgHoldText}
+                └ X{fgMult} 补帧帧序缓冲: {fgHoldText}
               </div>
             </>
           )}

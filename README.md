@@ -1,13 +1,13 @@
 <h1 align="center">🚀 XStreaming Desktop Enhanced</h1>
 
 <p align="center">
-  <b>原生双架构硬件加速：内置真 NVIDIA DLSS 5 + AMD RadeonNR 光影精雕（均支持双层串联） + 真 X2 插帧 + 0ms 级超低延迟 Xbox 串流增强客户端</b>
+  <b>原生双架构硬件加速：内置真 NVIDIA DLSS 5 + AMD RadeonNR 光影精雕（均支持双层串联） + 真 2X / 3X 多模型光流补帧 + 0ms 级超低延迟 Xbox 串流增强客户端</b>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11%20%7C%20SteamOS-0078D6?style=flat-square&logo=windows" alt="Windows & SteamOS" />
-  <img src="https://img.shields.io/badge/NVIDIA-DLSS%205%20%2B%20NVOFA-76B900?style=flat-square&logo=nvidia" alt="NVIDIA DLSS 5" />
-  <img src="https://img.shields.io/badge/AMD%20Radeon-RadeonNR%20%2B%20PyrFlow%20X2-ED1C24?style=flat-square&logo=amd" alt="AMD Radeon" />
+  <img src="https://img.shields.io/badge/NVIDIA-DLSS%205%20%2B%20NVOFA%202X%2F3X-76B900?style=flat-square&logo=nvidia" alt="NVIDIA DLSS 5" />
+  <img src="https://img.shields.io/badge/AMD%20Radeon-RadeonNR%20%2B%20PyrFlow%202X%2F3X-ED1C24?style=flat-square&logo=amd" alt="AMD Radeon" />
   <img src="https://img.shields.io/badge/Steam%20Deck-Native%20RDNA2%20800P%2060%2F90Hz-1A9FFF?style=flat-square&logo=steamdeck" alt="Steam Deck" />
   <img src="https://img.shields.io/badge/Console-Xbox%20Series%20S%20%7C%20Series%20X-107C10?style=flat-square&logo=xbox" alt="Xbox Series X|S" />
 </p>
@@ -83,10 +83,16 @@ Xbox Series S 最大的遗憾是大量次世代 3A 大作（如《荒野大镖�
 - **支持「再叠加一层」双层显存串联 (`2× DLSS 5`)**：可在 `F8` 面板一键开启双层模式，将第 1 层 `nvngx_dlssnr` 的增强输出在显存内零拷贝直喂给第 2 层做二次深度重塑，第 2 层风格与强度独立可调。
 - **1:1 对齐 `Magpie` 原版无损色彩与风格实时切换**：完整移植 `ApplyOklabControls` 中性直通与 `4x4 Catmull-Rom` 双三次残差上采样；切换 **自然均衡 / 鲜明通透 / 电影光影** 时自动下发 `DLSSNR.Reset = 1` 当帧即时刷新模型状态。
 
-### 2. NVOFA 硬件光流真 X2 插帧（专克 `30-in-60` 串流容器）
-- **`HLSL_DETECT_DUPLICATE` 智能去重**：4,096 块亮度均值抗 H.264 P 帧量化蚊噪检测，精准丢弃 60Hz WebRTC 流里的 30fps 重复包。
-- **零竞态运动场汇聚 (`HLSL_PROJECT_FLOW`) + 双空间遮挡修补 (`RG8_UNORM FlowConf`)**：严禁快速旋转的背景跨过画面中央静止的第三人称角色与武器，平滑修补单侧遮挡边缘，剧烈甩镜头人物轮廓不碎裂、彩色血条与小地图零闪烁。
-- **精确锚定第 1 帧上屏时刻的半周期排期**：完美兼容「逐帧同步零残影 DLSS 5」与双层叠加模式，杜绝 `FLIP_DISCARD` 瞬时吞帧，稳稳输出真 60 FPS。
+### 2. 硬件光流真 `2X / 3X` 多倍插帧 + 四大游戏类型专用补帧模型（Windows 版专属，专克 `30-in-60` 串流容器）
+- **`2X` 二倍补帧与 `3X` 三倍补帧自由切换**：
+  - **`2X` 二倍补帧 (`30→60 / 60→120 FPS`)**：严格 `1/2` 几何中点排期，兼顾超低延迟与满帧丝滑；
+  - **`3X` 三倍补帧 (`30→90 / 60→180 FPS`)**：专为 `120Hz / 144Hz / 165Hz / 240Hz` 电脑高刷显示器打造！精确求解 `1/3` 与 `2/3` 非对称双向光流相位，让锁 30 帧主机大作直飙 **90 FPS**、原生 60 帧大作直飙 **180 FPS**！
+- **内置 4 大专用 GPU 补帧算法模型（可在 `F8` 面板实时无感切换）**：
+  1. **🎯 均衡全能 (`Optical-Balanced v3`)**：双向光流遮挡自洽 + 5 点十字中值去毛刺，通吃 90% 综合 3A 游戏（默认推荐）；
+  2. **🏎️ 竞速射击大动态 (`Action-UltraWide Pro`)**：扩展 4 层 `±92px` 广域搜索锥 + 5 点抗振铃运动锐度补偿，专为《极限竞速：地平线》/ FPS 高速甩视角与 `3X` 超高刷定制；
+  3. **🛡️ 轮廓零果冻 (`Edge-Lock HaloFree`)**：完整 `3×3` 九宫格邻域矢量中值 + 局部光流剪切度感知单侧表面锁定，根治《黑神话》/ 魂类第三人称人物挥刀与发丝半透明重影；
+  4. **✨ 字幕UI强护盾 (`Anime & HUD-Shield Max`)**：双环 `±3px / ±5px` 文字小地图强护盾 + 赛璐珞深色描边防灰化保真，专为 JRPG /《博德之门 3》多字幕界面与二次元游戏定制。
+- **`HLSL_DETECT_DUPLICATE` 智能去重**：4,096 块亮度均值抗 H.264 P 帧量化蚊噪检测，精准丢弃 60Hz WebRTC 流里的 30fps 重复包，完美兼容「逐帧同步零残影 DLSS 5」与双层叠加模式。
 
 ### 3. 专为「有线 Xbox + Wi-Fi 6 电脑」打造的全链路极限降延迟
 - **音视频唇音同步锁解绑 (`A/V Lip-Sync Unbind`)**：拦截 `<video>.srcObject` 剥离音画共享 `MediaStream`，禁止 Chromium 为等待音频缓冲而扣押已解码视频帧（**立减 `15 ~ 35ms`**）。
