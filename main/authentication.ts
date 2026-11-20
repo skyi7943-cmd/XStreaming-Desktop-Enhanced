@@ -390,9 +390,18 @@ export default class Authentication {
   }
 
   openAuthWindow(url) {
+    const isSteamOs =
+      process.platform === "linux" &&
+      (process.env.SteamDeck === "1" ||
+        Boolean(process.env.GAMESCOPE_WAYLAND_DISPLAY) ||
+        process.env.XDG_CURRENT_DESKTOP === "gamescope");
+
     const authWindow = createWindow("auth", {
-      width: 500,
-      height: 600,
+      width: isSteamOs ? 1280 : 500,
+      height: isSteamOs ? 800 : 600,
+      fullscreen: isSteamOs,
+      parent: isSteamOs ? this._application._mainWindow : undefined,
+      modal: isSteamOs,
       title: "Authentication",
     });
 

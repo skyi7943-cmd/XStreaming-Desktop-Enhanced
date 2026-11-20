@@ -338,17 +338,22 @@ export function loadSavedEnhanceSettings(): EnhanceSettings {
   if (typeof window === "undefined") {
     return { ...DEFAULT_ENHANCE_SETTINGS };
   }
+  const isLinuxOrSteamOs =
+    typeof navigator !== "undefined" && /Linux/i.test(navigator.platform || navigator.userAgent || "");
+  const platformDefault: EnhanceSettings = isLinuxOrSteamOs
+    ? { ...DEFAULT_ENHANCE_SETTINGS, ...ENHANCE_PRESETS.steamDeckHandheld.patch }
+    : { ...DEFAULT_ENHANCE_SETTINGS };
   try {
     const raw = window.localStorage.getItem(ENHANCE_STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_ENHANCE_SETTINGS };
+    if (!raw) return platformDefault;
     const parsed = JSON.parse(raw);
     return {
-      ...DEFAULT_ENHANCE_SETTINGS,
+      ...platformDefault,
       ...parsed,
       splitCompare: 0.0,
     };
   } catch {
-    return { ...DEFAULT_ENHANCE_SETTINGS };
+    return platformDefault;
   }
 }
 

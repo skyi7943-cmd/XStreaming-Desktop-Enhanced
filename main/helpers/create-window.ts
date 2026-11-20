@@ -66,7 +66,16 @@ export default (windowName: string, options: BrowserWindowConstructorOptions): B
         store.set(key, state)
     }
 
-    state = ensureVisibleOnSomeDisplay(restore())
+    const isGamescope =
+        process.platform === 'linux' &&
+        (process.env.SteamDeck === '1' ||
+            Boolean(process.env.GAMESCOPE_WAYLAND_DISPLAY) ||
+            process.env.XDG_CURRENT_DESKTOP === 'gamescope' ||
+            process.env.XDG_SESSION_DESKTOP === 'gamescope')
+
+    state = isGamescope
+        ? { x: 0, y: 0, width: options.width || 1280, height: options.height || 800 }
+        : ensureVisibleOnSomeDisplay(restore())
 
     const browserOptions: BrowserWindowConstructorOptions = {
         ...options,

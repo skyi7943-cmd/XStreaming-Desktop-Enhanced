@@ -2,6 +2,11 @@ appId: com.Geocld.xstreaming
 productName: XStreaming
 copyright: Copyright © 2024 Geocld
 npmRebuild: false
+afterPack: ./scripts/afterPackSteamOS.js
+
+asarUnpack:
+  - "**/node_modules/peasyo-sdl-lib/**/*"
+  - "**/node_modules/node-hid/**/*"
 
 directories:
   output: dist
@@ -56,7 +61,7 @@ nsis:
 # Linux / SteamOS (Steam Deck) configuration
 linux:
   category: Game
-  artifactName: "XStreaming-Desktop-Enhanced-SteamDeck-${arch}.${ext}"
+  executableName: xstreaming
+  artifactName: "XStreaming-SteamDeck-SteamOS-${arch}.${ext}"
   target:
     - "AppImage"
-    - "deb"

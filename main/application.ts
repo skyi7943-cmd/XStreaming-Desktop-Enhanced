@@ -369,7 +369,14 @@ export default class Application {
       backgroundColor: "rgb(26, 27, 30)",
     };
 
-    if (settings.fullscreen) {
+    const isGamescope =
+      process.platform === "linux" &&
+      (process.env.SteamDeck === "1" ||
+        Boolean(process.env.GAMESCOPE_WAYLAND_DISPLAY) ||
+        process.env.XDG_CURRENT_DESKTOP === "gamescope" ||
+        process.env.XDG_SESSION_DESKTOP === "gamescope");
+
+    if (settings.fullscreen || isGamescope) {
       windowOptions.fullscreen = true;
     }
 
