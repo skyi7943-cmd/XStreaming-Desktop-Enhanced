@@ -13,11 +13,6 @@ files:
       - package.json
       - app
 
-extraResources:
-  - from: native/bin
-    to: native
-    filter:
-      - "**/*"
 publish:
 - github
 
@@ -44,7 +39,11 @@ dmg:
 # Windows configuration
 win:
   signAndEditExecutable: false
-  # icon: "src/app/assets/images/icon.ico"
+  extraResources:
+    - from: native/bin
+      to: native
+      filter:
+        - "**/*"
   target:
     - "zip"
     - "nsis"
@@ -54,9 +53,10 @@ nsis:
   oneClick: true
   perMachine: true
 
-# Linux configuration
+# Linux / SteamOS (Steam Deck) configuration
 linux:
   category: Game
+  artifactName: "XStreaming-Desktop-Enhanced-SteamDeck-${arch}.${ext}"
   target:
     - "AppImage"
     - "deb"

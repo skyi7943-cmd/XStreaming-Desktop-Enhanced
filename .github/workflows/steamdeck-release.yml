@@ -1,0 +1,48 @@
+name: Build Steam Deck (SteamOS AppImage) Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "GitHub Release Tag to attach AppImage"
+        required: false
+        default: "v1.10.3-dlss5-v6"
+
+permissions:
+  contents: write
+
+jobs:
+  build-steamdeck:
+    name: Build SteamOS x86_64 AppImage
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install system libs for AppImage packaging
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2
+
+      - name: Install Yarn dependencies
+        run: yarn install --network-timeout 120000
+
+      - name: Build Next.js + Electron Main + SteamOS AppImage
+        run: |
+          npx next build renderer
+          npx next export -o app renderer
+          node node_modules/nextron/bin/webpack.config.js
+          npx electron-builder --linux AppImage --x64 --publish never
+          ls -lh dist/
+
+      - name: Attach Steam Deck AppImage to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag || 'v1.10.3-dlss5-v6' }}"
+          gh release upload "$TAG" dist/XStreaming-Desktop-Enhanced-SteamDeck-x86_64.AppImage --clobber

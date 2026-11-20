@@ -42,6 +42,7 @@ import {
   setTurboGamepadEnabled,
 } from "../../lib/webrtcLowLatency";
 import { enhancedRecorder } from "../../lib/enhancedRecorder";
+import { steamDeckWebglEnhancer } from "../../lib/steamDeckWebglEnhancer";
 import type {
   NativeGamepadTestControllerSnapshot,
   NativeGamepadTestSnapshot,
@@ -299,6 +300,7 @@ function Stream() {
       void enhancedRecorder.stop().catch(() => undefined);
       setIsRecording(false);
     }
+    steamDeckWebglEnhancer.stop();
     void Ipc.send("enhance", "stopEngine").catch(() => undefined);
 
     router.back();
@@ -648,6 +650,7 @@ function Stream() {
     applyWifi6LowLatencyMode(next.wifi6JitterMode);
     setAvSyncUnbind(next.avSyncUnbind);
     setTurboGamepadEnabled(next.turboGamepad);
+    steamDeckWebglEnhancer.updateSettings(next);
     // 录制期间若用户打开 F8 实时调参，强制保持 obsCaptureCompat=true，避免覆盖层切回防捕获锁死导致录屏丢失增强层
     const enginePatch = enhancedRecorder.isRecording()
       ? { ...next, obsCaptureCompat: true }
@@ -784,19 +787,23 @@ function Stream() {
     };
     const cutoutTimer = setInterval(syncUiCutouts, 60);
 
+    const toggleEnhanceCompare = () => {
+      const toggled = !enhanceSettingsRef.current.enabled;
+      const next = { ...enhanceSettingsRef.current, enabled: toggled };
+      handleEnhanceSettingsChange(next);
+      addToast({
+        title: toggled ? "🚀 光影精雕 + 真 X2 增强已开启" : "👁️ 已切换至原画直出对比",
+        color: toggled ? "success" : "warning",
+      });
+    };
+
     const onHotkey = (e: KeyboardEvent) => {
       if (e.key === "F8") {
         e.preventDefault();
         setShowEnhanceDrawer((prev) => !prev);
       } else if (e.key === "F6") {
         e.preventDefault();
-        const toggled = !enhanceSettingsRef.current.enabled;
-        const next = { ...enhanceSettingsRef.current, enabled: toggled };
-        handleEnhanceSettingsChange(next);
-        addToast({
-          title: toggled ? "🚀 DLSS 5 + X2 低延迟增强已开启" : "👁️ 已切换至原画直出对比",
-          color: toggled ? "success" : "warning",
-        });
+        toggleEnhanceCompare();
       } else if (e.key === "F7") {
         e.preventDefault();
         setShowPerformance((prev) => !prev);
@@ -807,14 +814,73 @@ function Stream() {
     };
     window.addEventListener("keydown", onHotkey);
 
+    // Steam Deck / Windows 掌机无物理 F 键手柄组合快捷键：
+    // 按住左视图键 View (⧉, Button 8) + R3(11)=F8调参 / L3(10)=F7监控 / Y(3)=F6对比 / X(2)=F9录屏
+    let prevChord = "";
+    const padChordTimer = setInterval(() => {
+      if (connectStateRef.current !== "connected") return;
+      let viewPressed = false;
+      let r3Pressed = false;
+      let l3Pressed = false;
+      let yPressed = false;
+      let xPressed = false;
+
+      const gpNative: any = (window as any).gpState;
+      if (gpNative) {
+        viewPressed = !!gpNative.View;
+        r3Pressed = !!gpNative.RightThumb;
+        l3Pressed = !!gpNative.LeftThumb;
+        yPressed = !!gpNative.Y;
+        xPressed = !!gpNative.X;
+      }
+      if (!viewPressed && typeof navigator !== "undefined" && navigator.getGamepads) {
+        const pads = navigator.getGamepads();
+        for (let i = 0; i < pads.length; i++) {
+          const p = pads[i];
+          if (p && p.connected && p.buttons && p.buttons.length >= 12) {
+            if (p.buttons[8]?.pressed) {
+              viewPressed = true;
+              r3Pressed = !!p.buttons[11]?.pressed;
+              l3Pressed = !!p.buttons[10]?.pressed;
+              yPressed = !!p.buttons[3]?.pressed;
+              xPressed = !!p.buttons[2]?.pressed;
+              break;
+            }
+          }
+        }
+      }
+
+      const activeChord = viewPressed
+        ? r3Pressed
+          ? "F8"
+          : l3Pressed
+          ? "F7"
+          : yPressed
+          ? "F6"
+          : xPressed
+          ? "F9"
+          : ""
+        : "";
+
+      if (activeChord && activeChord !== prevChord) {
+        if (activeChord === "F8") setShowEnhanceDrawer((prev) => !prev);
+        else if (activeChord === "F7") setShowPerformance((prev) => !prev);
+        else if (activeChord === "F6") toggleEnhanceCompare();
+        else if (activeChord === "F9") void handleToggleRecording();
+      }
+      prevChord = activeChord;
+    }, 45);
+
     return () => {
       clearInterval(jitterTimer);
       clearInterval(cutoutTimer);
+      clearInterval(padChordTimer);
       window.removeEventListener("keydown", onHotkey);
       Ipc.removeListener("enhance", listener);
       if (enhancedRecorder.isRecording()) {
         void enhancedRecorder.stop().catch(() => undefined);
       }
+      steamDeckWebglEnhancer.stop();
       void Ipc.send("enhance", "stopEngine").catch(() => undefined);
     };
   }, [handleEnhanceSettingsChange, handleToggleRecording]);
@@ -1100,12 +1166,34 @@ function Stream() {
           setLoadingText(t("Connected"));
           applyWifi6LowLatencyMode(enhanceSettingsRef.current.wifi6JitterMode);
 
-          // 连接成功后自动启动内置原生 DLSS 5 + NVOFA X2 低延迟补帧 + CAS/RCAS 锐化引擎
+          // 连接成功后自动启动增强管线：Windows 启动 C++ D3D11/D3D12 原生引擎，SteamOS (Steam Deck) 自动无缝启用 WebGL2 RDNA2 硬件加速管线！
           if (!settings.fsr) {
             setTimeout(() => {
-              void Ipc.send("enhance", "startEngine", enhanceSettingsRef.current).catch(
-                (err) => console.warn("Failed to start native enhance engine:", err)
-              );
+              void Ipc.send("enhance", "startEngine", enhanceSettingsRef.current)
+                .then((res: any) => {
+                  if (res?.useWebglFallback || res?.supported === false) {
+                    steamDeckWebglEnhancer.start(
+                      enhanceSettingsRef.current,
+                      (tel) => {
+                        setEnhanceTelemetry((prev) => ({
+                          ...(prev || ({} as EnhanceTelemetry)),
+                          ...tel,
+                        }));
+                      }
+                    );
+                  }
+                })
+                .catch(() => {
+                  steamDeckWebglEnhancer.start(
+                    enhanceSettingsRef.current,
+                    (tel) => {
+                      setEnhanceTelemetry((prev) => ({
+                        ...(prev || ({} as EnhanceTelemetry)),
+                        ...tel,
+                      }));
+                    }
+                  );
+                });
             }, 600);
           }
 
@@ -1461,6 +1549,7 @@ function Stream() {
       void enhancedRecorder.stop().catch(() => undefined);
       setIsRecording(false);
     }
+    steamDeckWebglEnhancer.stop();
     void Ipc.send("enhance", "stopEngine").catch(() => undefined);
     setLoadingText(t("Disconnecting..."));
     xPlayer && xPlayer.close();
@@ -1565,6 +1654,15 @@ function Stream() {
               }
             }}
             onEnhance={() => setShowEnhanceDrawer(true)}
+            onToggleCompare={() => {
+              const toggled = !enhanceSettingsRef.current.enabled;
+              const next = { ...enhanceSettingsRef.current, enabled: toggled };
+              handleEnhanceSettingsChange(next);
+              addToast({
+                title: toggled ? "🚀 光影精雕 + 真 X2 增强已开启" : "👁️ 已切换至原画直出对比",
+                color: toggled ? "success" : "warning",
+              });
+            }}
             isRecording={isRecording}
             onToggleRecording={handleToggleRecording}
             onAudio={() => setShowAudio(true)}

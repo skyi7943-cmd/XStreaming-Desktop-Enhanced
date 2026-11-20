@@ -98,7 +98,25 @@ function ActionBar(props) {
             className="font-bold text-black shadow-md"
             onPress={() => props.onEnhance && props.onEnhance()}
           >
-            🚀 DLSS 5 + X2 (F8)
+            🚀 增强调参 (F8)
+          </Button>
+          <Button
+            color="secondary"
+            variant="flat"
+            size="sm"
+            className="font-semibold text-white shadow-md bg-zinc-900/80"
+            onPress={() => props.onToggleCompare && props.onToggleCompare()}
+          >
+            👁️ 原画对比 (F6)
+          </Button>
+          <Button
+            color="primary"
+            variant="flat"
+            size="sm"
+            className="font-semibold text-white shadow-md bg-zinc-900/80"
+            onPress={() => props.onTogglePerformance && props.onTogglePerformance()}
+          >
+            📊 延迟监控 (F7)
           </Button>
           <Button
             color={isRecording ? "danger" : "warning"}

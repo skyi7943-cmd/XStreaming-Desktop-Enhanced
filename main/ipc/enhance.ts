@@ -75,8 +75,35 @@ export default class IpcEnhance extends IpcBase {
     return Promise.resolve(this._manager.runSelfTest());
   }
 
-  async prepareScreenRecording(args: { ext?: string } = {}) {
+  async prepareScreenRecording(args: { ext?: string; canvasDirect?: boolean } = {}) {
     await this.finishScreenRecording().catch(() => undefined);
+
+    const dirPath = this.resolveRecordingDir();
+    fs.mkdirSync(dirPath, { recursive: true });
+
+    const safeExt = args?.ext === "mp4" ? "mp4" : "webm";
+    const now = new Date();
+    const pad2 = (n: number) => String(n).padStart(2, "0");
+    const stamp =
+      `${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}_` +
+      `${pad2(now.getHours())}${pad2(now.getMinutes())}${pad2(now.getSeconds())}`;
+    const filePath = path.join(dirPath, `XStreaming_DLSS5_${stamp}.${safeExt}`);
+
+    // SteamOS / WebGL2 画布直录模式：无需请求桌面屏幕源权限，直接创建输出文件流！
+    if (args?.canvasDirect) {
+      this._recStream = fs.createWriteStream(filePath);
+      this._recFilePath = filePath;
+      this._recDirPath = dirPath;
+      this._recBytes = 0;
+      return {
+        ok: true,
+        canvasDirect: true,
+        sourceId: "webgl-canvas-direct",
+        filePath,
+        dirPath,
+        fullScreen: true,
+      };
+    }
 
     const win = this._application._mainWindow;
     if (!win || win.isDestroyed()) {
@@ -112,17 +139,6 @@ export default class IpcEnhance extends IpcBase {
 
     const targetW = Math.max(128, Math.round(relW * scale)) & ~1;
     const targetH = Math.max(128, Math.round(relH * scale)) & ~1;
-
-    const dirPath = this.resolveRecordingDir();
-    fs.mkdirSync(dirPath, { recursive: true });
-
-    const safeExt = args?.ext === "mp4" ? "mp4" : "webm";
-    const now = new Date();
-    const pad2 = (n: number) => String(n).padStart(2, "0");
-    const stamp =
-      `${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}_` +
-      `${pad2(now.getHours())}${pad2(now.getMinutes())}${pad2(now.getSeconds())}`;
-    const filePath = path.join(dirPath, `XStreaming_DLSS5_${stamp}.${safeExt}`);
 
     this._recStream = fs.createWriteStream(filePath);
     this._recFilePath = filePath;

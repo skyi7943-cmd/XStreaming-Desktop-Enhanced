@@ -5,15 +5,20 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-0078D6?style=flat-square&logo=windows" alt="Windows" />
+  <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11%20%7C%20SteamOS-0078D6?style=flat-square&logo=windows" alt="Windows & SteamOS" />
   <img src="https://img.shields.io/badge/NVIDIA-DLSS%205%20%2B%20NVOFA-76B900?style=flat-square&logo=nvidia" alt="NVIDIA DLSS 5" />
   <img src="https://img.shields.io/badge/AMD%20Radeon-RadeonNR%20%2B%20PyrFlow%20X2-ED1C24?style=flat-square&logo=amd" alt="AMD Radeon" />
+  <img src="https://img.shields.io/badge/Steam%20Deck-Native%20RDNA2%20800P%2060%2F90Hz-1A9FFF?style=flat-square&logo=steamdeck" alt="Steam Deck" />
   <img src="https://img.shields.io/badge/Console-Xbox%20Series%20S%20%7C%20Series%20X-107C10?style=flat-square&logo=xbox" alt="Xbox Series X|S" />
 </p>
 
 <p align="center">
   <a href="https://github.com/skyi7943-cmd/XStreaming-Desktop-Enhanced/releases/download/v1.10.3-dlss5-v6/XStreaming-Desktop-Enhanced-v1.10.3-dlss5-Win64-Portable.zip">
-    <img src="https://img.shields.io/badge/%E2%AC%87%EF%B8%8F%20%E7%AB%8B%E5%8D%B3%E4%B8%8B%E8%BD%BD%E7%BB%BF%E8%89%B2%E5%85%8D%E5%AE%89%E8%A3%85%E5%AE%8C%E6%95%B4%E7%89%88-Win64%20Portable%20(246.9%20MB)-10B981?style=for-the-badge" alt="立即下载绿色免安装完整版" />
+    <img src="https://img.shields.io/badge/%E2%AC%87%EF%B8%8F%20Windows%20%E7%BB%BF%E8%89%B2%E5%85%8D%E5%AE%89%E8%A3%85%E5%AE%8C%E6%95%B4%E7%89%88-Win64%20Portable%20(246.9%20MB)-10B981?style=for-the-badge" alt="Windows绿色免安装完整版" />
+  </a>
+  &nbsp;
+  <a href="https://github.com/skyi7943-cmd/XStreaming-Desktop-Enhanced/releases/download/v1.10.3-dlss5-v6/XStreaming-Desktop-Enhanced-SteamDeck-x86_64.AppImage">
+    <img src="https://img.shields.io/badge/%F0%9F%8E%AE%20Steam%20Deck%20%E5%8E%9F%E7%94%9F%E6%8E%8C%E6%9C%BA%E7%89%88-SteamOS%20AppImage%20(x86__64)-1A9FFF?style=for-the-badge&logo=steamdeck" alt="Steam Deck 原生 AppImage" />
   </a>
 </p>
 
@@ -99,10 +104,10 @@ Xbox Series S 最大的遗憾是大量次世代 3A 大作（如《荒野大镖�
 
 | 快捷键 | 功能说明 |
 | :---: | :--- |
-| **`F8`** | 呼出 / 收起 **DLSS 5（单层/双层）+ 真 X2 补帧 + 锐化 + 降延迟实时控制中心** |
-| **`F6`** | 一键切换 **增强画面 / 原版串流画面**（瞬间对比增强效果） |
-| **`F7`** | 显示 / 隐藏 **性能与硬件实测真实增加延迟监控条**（含 DLSS 5 推理耗时与总增延拆解） |
-| **`F9`** | 开始 / 停止 **60FPS 增强画面 + Xbox 纯净游戏原声内录**（默认保存至 `E:\XStreaming_Recordings\`） |
+| **`F8` / 手柄 `⧉ + R3`** | 呼出 / 收起 **DLSS 5 / RadeonNR（单层/双层）+ 真 X2 补帧 + 锐化 + 降延迟实时控制中心** |
+| **`F6` / 手柄 `⧉ + Y`** | 一键切换 **增强画面 / 原版串流画面**（瞬间对比增强效果） |
+| **`F7` / 手柄 `⧉ + L3`** | 显示 / 隐藏 **性能与硬件实测真实增加延迟监控条**（含推理耗时与总增延拆解） |
+| **`F9` / 手柄 `⧉ + X`** | 开始 / 停止 **60FPS 增强画面 + Xbox 纯净游戏原声内录**（Windows 存至 `E:\XStreaming_Recordings\`，SteamOS 存至 `~/Videos/XStreaming_Recordings/`） |
 
 ---
 
@@ -117,9 +122,18 @@ Xbox Series S 最大的遗憾是大量次世代 3A 大作（如《荒野大镖�
   2. **内置 `RadeonNR` Oklab 三尺度光影精雕与去色带引擎**：零外部 DLL 依赖，在 A 卡上 100% 完整激活第 3 栏全部功能——**「自然均衡 / 鲜明通透 / 电影光影」** 三大预设风格、**「再叠加一层」双层显存串联**、H.264 8-bit 天空阶梯去色带及黑夜暗场零斑点保护（双层 GPU 耗时仅 `~3ms`）；
   3. **内置 `AMD_PyrFlow` 三级由粗到精金字塔双向光流引擎**：最高覆盖 `±96px` 30fps 主机大幅摇杆转视角，独立计算前/反向光流与循环一致性遮挡置信度，配合 `30-in-60` 重复帧滤除在 A 卡与 Windows 掌机上实现 **零重影真 30→60 FPS 丝滑补帧**！
 
-### 开箱即用（Release 绿色免安装完整版）
-1. 直接点击下载 [**XStreaming-Desktop-Enhanced-v1.10.3-dlss5-Win64-Portable.zip (246.9 MB)**](https://github.com/skyi7943-cmd/XStreaming-Desktop-Enhanced/releases/download/v1.10.3-dlss5-v6/XStreaming-Desktop-Enhanced-v1.10.3-dlss5-Win64-Portable.zip)（已完整内置 `XStreaming.exe` + 原生超低延迟引擎 + `nvngx_dlssnr.dll` 真 DLSS 5 运行库，无需安装任何开发环境）；
-2. 解压后双击运行 `win-unpacked\XStreaming.exe`，登录微软 Xbox 账号连接你的 **Xbox Series S** 或 **Xbox Series X**，进入串流即自动挂载增强引擎！
+### 开箱即用（Windows 电脑 & Steam Deck 双版本直装指南）
+
+#### 🖥️ 方案 A：Windows 10/11 电脑 & 刷了 Windows 的掌机（ROG Ally / Legion Go / WinDeck）
+1. 直接点击下载 [**XStreaming-Desktop-Enhanced-v1.10.3-dlss5-Win64-Portable.zip (246.9 MB)**](https://github.com/skyi7943-cmd/XStreaming-Desktop-Enhanced/releases/download/v1.10.3-dlss5-v6/XStreaming-Desktop-Enhanced-v1.10.3-dlss5-Win64-Portable.zip)（已完整内置 `XStreaming.exe` + 原生双架构超低延迟引擎 + `nvngx_dlssnr.dll` 运行库）；
+2. 解压后双击运行 `win-unpacked\XStreaming.exe`，登录微软 Xbox 账号连接 **Xbox Series S** 或 **Xbox Series X** 即可！
+
+#### 🎮 方案 B：Steam Deck 原生系统（SteamOS 3.x LCD 60Hz / OLED 90Hz 满血版）
+专为 **Steam Deck** 定制了 **原生 `SteamOS x86_64 AppImage`**，内置 **AMD RDNA2 WebGL2 零拷贝硬件加速管线（`Deck_PyrFlow` 30→60 真插帧 + `RadeonNR` Oklab 双层光影精雕 + `VA-API` 硬件解码 + 无物理键盘手柄组合键）**：
+1. 在 Steam Deck 切换至 **桌面模式 (Desktop Mode)**，下载 [**XStreaming-Desktop-Enhanced-SteamDeck-x86_64.AppImage**](https://github.com/skyi7943-cmd/XStreaming-Desktop-Enhanced/releases/download/v1.10.3-dlss5-v6/XStreaming-Desktop-Enhanced-SteamDeck-x86_64.AppImage)；
+2. 右键该 `.AppImage` 文件 → **属性 (Properties)** → **权限 (Permissions)** → 勾选 **允许作为程序执行 (Is executable)**（或终端执行 `chmod +x XStreaming-Desktop-Enhanced-SteamDeck-x86_64.AppImage`）；
+3. 右键选择 **添加到 Steam (Add to Steam)**，返回 **Steam 掌机游戏模式 (Gaming Mode)** 启动即可全屏畅玩！
+4. **掌机免键盘操控**：串流中直接**轻触屏幕**呼出顶部快捷栏，或按住左上方 **视图键 `⧉` + 右摇杆按下 `R3`** 即可随时调出增强面板，一键启用 **「🎮 Steam Deck 掌机黄金预设 (800P 鲜明通透 + 真插60)」**！
 
 ### 从源码编译构建
 

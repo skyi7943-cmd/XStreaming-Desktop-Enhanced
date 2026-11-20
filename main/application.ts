@@ -93,20 +93,38 @@ export default class Application {
       )
     } else if (settings.use_vulkan) {
       ElectronApp.commandLine.appendSwitch('use-vulkan')
-      ElectronApp.commandLine.appendSwitch('enable-features', 'Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,VaapiIgnoreDriverChecks,VaapiVideoDecoder,PlatformHEVCDecoderSupport,CanvasOopRasterization')
+      ElectronApp.commandLine.appendSwitch('enable-features', 'Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,VaapiIgnoreDriverChecks,VaapiVideoDecoder,PlatformHEVCDecoderSupport,CanvasOopRasterization,WebRtcHideLocalIpsWithMdns')
       ElectronApp.commandLine.appendSwitch('enable-gpu-rasterization')
       ElectronApp.commandLine.appendSwitch('enable-oop-rasterization')
       ElectronApp.commandLine.appendSwitch('enable-accelerated-video-decode')
+      ElectronApp.commandLine.appendSwitch('disable-frame-rate-limit')
+      ElectronApp.commandLine.appendSwitch('disable-renderer-backgrounding')
+      ElectronApp.commandLine.appendSwitch('disable-background-timer-throttling')
+      ElectronApp.commandLine.appendSwitch('force-fieldtrials', 'WebRTC-ZeroPlayoutDelay/min_pacing:0ms,max_decode_queue_size:2/')
       ElectronApp.commandLine.appendSwitch('ozone-platform-hint', 'x11')
       ElectronApp.commandLine.appendSwitch('ignore-gpu-blocklist')
       ElectronApp.commandLine.appendSwitch('no-sandbox');
       ElectronApp.commandLine.appendSwitch('enable-zero-copy');
     } else {
-      ElectronApp.commandLine.appendSwitch('ignore-gpu-blacklist')
+      // SteamOS 3.x (Steam Deck LCD 60Hz / OLED 90Hz) & Linux 默认专属 VA-API RDNA2 硬件加速与 0ms WebRTC 低延迟管线
+      ElectronApp.commandLine.appendSwitch('ignore-gpu-blocklist')
       ElectronApp.commandLine.appendSwitch('enable-gpu-rasterization')
       ElectronApp.commandLine.appendSwitch('enable-oop-rasterization')
       ElectronApp.commandLine.appendSwitch('enable-accelerated-video-decode')
+      ElectronApp.commandLine.appendSwitch('enable-zero-copy')
+      ElectronApp.commandLine.appendSwitch('disable-frame-rate-limit')
+      ElectronApp.commandLine.appendSwitch('disable-renderer-backgrounding')
+      ElectronApp.commandLine.appendSwitch('disable-background-timer-throttling')
+      ElectronApp.commandLine.appendSwitch('webrtc-max-cpu-consumption-percentage', '100')
+      ElectronApp.commandLine.appendSwitch('force-fieldtrials', 'WebRTC-ZeroPlayoutDelay/min_pacing:0ms,max_decode_queue_size:2/')
+      ElectronApp.commandLine.appendSwitch(
+        'enable-features',
+        'VaapiVideoDecoder,VaapiIgnoreDriverChecks,CanvasOopRasterization,PlatformHEVCDecoderSupport,WebRtcHideLocalIpsWithMdns'
+      )
       ElectronApp.commandLine.appendSwitch('ozone-platform-hint', 'x11')
+      if (process.platform === 'linux') {
+        ElectronApp.commandLine.appendSwitch('no-sandbox')
+      }
     }
 
     this.readStartupFlags(settings);

@@ -99,8 +99,14 @@ export default function EnhanceControlDrawer({
   const dupCount = telemetry?.dupSkipped || 0;
   const is30In60Detected = isStreaming && dupCount >= 5;
   const detectedBackend = telemetry?.nrBackend || selfTestResult?.nrBackend || "";
+  const detectedVendor = telemetry?.vendor || selfTestResult?.vendor || "";
+  const isSteamDeck = detectedVendor === "steamdeck";
   const isRadeonNr = detectedBackend === "RadeonNR";
-  const nrShortName = isRadeonNr ? "RadeonNR 光影精雕" : "DLSS 5";
+  const nrShortName = isSteamDeck
+    ? "Deck RDNA2 光影精雕"
+    : isRadeonNr
+    ? "RadeonNR 光影精雕"
+    : "DLSS 5";
 
   return (
     <Drawer
@@ -122,7 +128,9 @@ export default function EnhanceControlDrawer({
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <span className="text-base font-extrabold tracking-tight text-emerald-400">
-                  {isRadeonNr
+                  {isSteamDeck
+                    ? "🎮 Steam Deck 光影精雕 + 真 X2 补帧中心"
+                    : isRadeonNr
                     ? "🔴 AMD Radeon 光影精雕 + 真 X2 补帧中心"
                     : "🚀 DLSS 5 (双层叠加) + 真 X2 补帧中心"}
                 </span>
@@ -139,10 +147,14 @@ export default function EnhanceControlDrawer({
               />
             </div>
             <p className="text-[11px] text-zinc-400 font-normal">
-              快捷键：<kbd className="px-1 py-0.5 bg-zinc-800 rounded text-zinc-200">F8</kbd> 调参 ·{" "}
+              键盘：<kbd className="px-1 py-0.5 bg-zinc-800 rounded text-zinc-200">F8</kbd> 调参 ·{" "}
               <kbd className="px-1 py-0.5 bg-zinc-800 rounded text-zinc-200">F6</kbd> 原画对比 ·{" "}
               <kbd className="px-1 py-0.5 bg-zinc-800 rounded text-zinc-200">F7</kbd> 真实延迟 ·{" "}
-              <kbd className="px-1 py-0.5 bg-zinc-800 rounded text-red-300">F9</kbd> 60帧增强录屏
+              <kbd className="px-1 py-0.5 bg-zinc-800 rounded text-red-300">F9</kbd> 60帧录屏
+            </p>
+            <p className="text-[11px] text-emerald-300/90 font-normal">
+              🎮 Steam Deck / 手柄组合键：按住 <kbd className="px-1 py-0.5 bg-zinc-800 rounded text-emerald-200">⧉(视图键)</kbd> +{" "}
+              <b>R3</b> 调参 · <b>Y</b> 对比 · <b>L3</b> 延迟 · <b>X</b> 录屏
             </p>
           </DrawerHeader>
 

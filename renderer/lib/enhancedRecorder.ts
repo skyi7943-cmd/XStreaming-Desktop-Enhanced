@@ -4,6 +4,7 @@
 
 import Ipc from "./ipc";
 import { cloneActiveXboxAudioTrack } from "./webrtcLowLatency";
+import { steamDeckWebglEnhancer } from "./steamDeckWebglEnhancer";
 
 export interface RecordingFinishResult {
   ok: boolean;
@@ -69,59 +70,73 @@ class EnhancedScreenRecorder {
     }
 
     const { mimeType, ext } = selectPreferredMime();
-    const prep: any = await Ipc.send("enhance", "prepareScreenRecording", { ext });
-    if (!prep || !prep.ok || !prep.sourceId) {
+    const deckCanvas = steamDeckWebglEnhancer.isActive()
+      ? steamDeckWebglEnhancer.getCanvas()
+      : null;
+
+    const prep: any = await Ipc.send("enhance", "prepareScreenRecording", {
+      ext,
+      canvasDirect: !!deckCanvas,
+    });
+    if (!prep || !prep.ok || (!prep.sourceId && !deckCanvas)) {
       throw new Error("初始化屏幕录制源失败");
     }
 
     this._filePath = String(prep.filePath || "");
     this._dirPath = String(prep.dirPath || "E:\\XStreaming_Recordings");
 
-    // 获取承载了原生 WDA_NONE 增强覆盖层的显示器 60FPS GPU 画面流
-    const desktopStream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        mandatory: {
-          chromeMediaSource: "desktop",
-          chromeMediaSourceId: prep.sourceId,
-          minFrameRate: 60,
-          maxFrameRate: 60,
-        },
-      } as any,
-    });
-    this._desktopStream = desktopStream;
+    let finalVideoTrack: MediaStreamTrack;
 
-    let finalVideoTrack: MediaStreamTrack = desktopStream.getVideoTracks()[0];
+    if (deckCanvas) {
+      // SteamOS / WebGL2 掌机模式：直接从 RDNA2 增强画布零弹窗直录 60FPS 视频流！
+      this._croppedStream = deckCanvas.captureStream(60);
+      finalVideoTrack = this._croppedStream.getVideoTracks()[0];
+    } else {
+      // Windows 桌面模式：获取承载了原生 WDA_NONE 增强覆盖层的显示器 60FPS GPU 画面流
+      const desktopStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          mandatory: {
+            chromeMediaSource: "desktop",
+            chromeMediaSourceId: prep.sourceId,
+            minFrameRate: 60,
+            maxFrameRate: 60,
+          },
+        } as any,
+      });
+      this._desktopStream = desktopStream;
+      finalVideoTrack = desktopStream.getVideoTracks()[0];
 
-    // 若当前为非全屏窗口模式，自动裁剪出纯游戏客户区画面，不把周围桌面壁纸录进去
-    if (!prep.fullScreen && prep.crop) {
-      const { normX, normY, normW, normH, targetW, targetH } = prep.crop;
-      const vid = document.createElement("video");
-      vid.muted = true;
-      vid.playsInline = true;
-      vid.srcObject = desktopStream;
-      await vid.play().catch(() => undefined);
-      this._cropVideoEl = vid;
+      // 若当前为非全屏窗口模式，自动裁剪出纯游戏客户区画面，不把周围桌面壁纸录进去
+      if (!prep.fullScreen && prep.crop) {
+        const { normX, normY, normW, normH, targetW, targetH } = prep.crop;
+        const vid = document.createElement("video");
+        vid.muted = true;
+        vid.playsInline = true;
+        vid.srcObject = desktopStream;
+        await vid.play().catch(() => undefined);
+        this._cropVideoEl = vid;
 
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(320, Number(targetW) || 1920);
-      canvas.height = Math.max(180, Number(targetH) || 1080);
-      const ctx = canvas.getContext("2d", { alpha: false });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(320, Number(targetW) || 1920);
+        canvas.height = Math.max(180, Number(targetH) || 1080);
+        const ctx = canvas.getContext("2d", { alpha: false });
 
-      if (ctx) {
-        const drawCrop = () => {
-          if (!vid.videoWidth || !vid.videoHeight) return;
-          const sx = Math.round(vid.videoWidth * normX);
-          const sy = Math.round(vid.videoHeight * normY);
-          const sw = Math.max(64, Math.round(vid.videoWidth * normW));
-          const sh = Math.max(64, Math.round(vid.videoHeight * normH));
-          ctx.drawImage(vid, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-        };
-        drawCrop();
-        this._cropTimer = setInterval(drawCrop, 1000 / 60);
-        this._croppedStream = canvas.captureStream(60);
-        const ct = this._croppedStream.getVideoTracks()[0];
-        if (ct) finalVideoTrack = ct;
+        if (ctx) {
+          const drawCrop = () => {
+            if (!vid.videoWidth || !vid.videoHeight) return;
+            const sx = Math.round(vid.videoWidth * normX);
+            const sy = Math.round(vid.videoHeight * normY);
+            const sw = Math.max(64, Math.round(vid.videoWidth * normW));
+            const sh = Math.max(64, Math.round(vid.videoHeight * normH));
+            ctx.drawImage(vid, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+          };
+          drawCrop();
+          this._cropTimer = setInterval(drawCrop, 1000 / 60);
+          this._croppedStream = canvas.captureStream(60);
+          const ct = this._croppedStream.getVideoTracks()[0];
+          if (ct) finalVideoTrack = ct;
+        }
       }
     }
 
